@@ -91,6 +91,57 @@ export declare const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usa
  * @returns the mapped usage snapshot.
  */
 export declare function fetchClaudeUsage(session: ClaudeSession, fetchFn?: FetchFn, signal?: AbortSignal, cliVersion?: () => Promise<string>): Promise<ProviderUsage>;
+/** The `capabilities` object of one `/v1/models` entry (subset). */
+export interface ClaudeModelCapabilities {
+    thinking?: {
+        types?: {
+            enabled?: {
+                supported?: boolean;
+            };
+            adaptive?: {
+                supported?: boolean;
+            };
+        };
+    };
+    effort?: {
+        supported?: boolean;
+        low?: {
+            supported?: boolean;
+        };
+        medium?: {
+            supported?: boolean;
+        };
+        high?: {
+            supported?: boolean;
+        };
+        xhigh?: {
+            supported?: boolean;
+        };
+        max?: {
+            supported?: boolean;
+        };
+    };
+}
+/**
+ * The thinking mode to request. Adaptive wins wherever it is offered: manual
+ * `enabled` + `budget_tokens` is deprecated on the 4.6 models (which accept
+ * both) and rejected from 4.7 on, and adaptive is what Claude Code sends —
+ * depth is then steered by `output_config.effort` rather than a fixed budget.
+ * The 4.5-and-earlier models advertise `enabled` only and keep it.
+ */
+export declare function claudeThinkingType(capabilities: ClaudeModelCapabilities | undefined): 'enabled' | 'adaptive' | undefined;
+/**
+ * The effort level to send for one request, fitted to the model's advertised
+ * levels. A session's effort survives a model switch, and Anthropic rejects a
+ * level the model lacks with HTTP 400 (`xhigh` on the 4.6 models, say), so an
+ * unsupported level falls to the highest advertised one below it — or the
+ * lowest advertised one when nothing is below. A value outside the Claude
+ * scale is not sent at all.
+ * @param requested - the harness's reasoning effort.
+ * @param reasoning - the model's discovered reasoning capability.
+ * @returns the level to put in `output_config.effort`, or undefined to omit it.
+ */
+export declare function claudeEffort(requested: string | undefined, reasoning: DiscoveredModel['reasoning']): string | undefined;
 /**
  * Fetch the live model catalog from the subscription endpoint. `signal`
  * cancels the request; `cliVersion` resolves the Claude Code version to

@@ -19,7 +19,9 @@ import type { ReasoningReplayItem, ResponsesStreamEvent } from '../src/translate
 import {
   AnthropicStreamTranslator,
   CLAUDE_CODE_IDENTITY,
+  CLAUDE_UNKNOWN_TOOL_OUTCOME,
   markMessageCache,
+  reconcileAnthropicToolPairs,
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
@@ -749,4 +751,140 @@ test('Anthropic translator: error event mapping', () => {
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
   )
+})
+
+/** A signed-thinking + tool_use response, as Anthropic streams it with thinking enabled. */
+const SIGNED_THINKING_EVENTS: AnthropicStreamEvent[] = [
+  { type: 'message_start', message: { usage: { input_tokens: 5 } } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Let me ' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'look.' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'EqSig' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'Part2' } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'content_block_start', index: 1, content_block: { type: 'redacted_thinking', data: 'ENCRYPTED' } },
+  { type: 'content_block_stop', index: 1 },
+  { type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'toolu-9', name: 'bash' } },
+  { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{}' } },
+  { type: 'content_block_stop', index: 2 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 3 } },
+  { type: 'message_stop' },
+]
+
+test('Anthropic translator: signed thinking rides the finish replay envelope', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), SIGNED_THINKING_EVENTS)
+  const finish = chunks.at(-1)
+  assert.equal(finish?.type, 'finish')
+  if (finish?.type !== 'finish') return
+  assert.deepEqual(finish.reason, { kind: 'tool-calls' })
+  const replay = finish.replayState as { response: unknown; blocks: Record<string, unknown>[] }
+  assert.deepEqual(replay.response, { kind: 'claude', version: 1 })
+  assert.equal(replay.blocks.length, 2, 'one entry per emitted harness block; redacted thinking has none')
+  const thinking = replay.blocks[0].thinking as { signature: string; digest: string }
+  assert.equal(thinking.signature, 'EqSigPart2', 'signature deltas concatenate')
+  assert.deepEqual(replay.blocks[1], { redactedBefore: ['ENCRYPTED'] }, 'redacted thinking rides with the next block')
+  assert.ok(!chunks.some(chunk => chunk.type === 'block-start' && chunk.blockType !== 'reasoning' && chunk.blockType !== 'tool-call'))
+})
+
+test('toAnthropicMessages replays signed thinking to the same route and model only', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), SIGNED_THINKING_EVENTS)
+  const finish = chunks.at(-1)
+  if (finish?.type !== 'finish') throw new Error('no finish')
+  const blocks = chunks.flatMap(chunk => (chunk.type === 'block-end' ? [chunk.block] : []))
+  const history = (model: string, content = blocks) => [
+    message('user', [{ type: 'text', text: 'go' }]),
+    message('assistant', content as ContentBlock[], {
+      kind: 'model', provider: 'claude', model, replayState: finish.replayState,
+    }),
+    message('tool', [{ type: 'text', text: 'done' }], { kind: 'tool', callId: ToolCallId('toolu-9') }),
+  ]
+  const same = toAnthropicMessages(history('claude-opus-5'), { provider: 'claude', model: 'claude-opus-5' })
+  assert.deepEqual(same[1].content, [
+    { type: 'thinking', thinking: 'Let me look.', signature: 'EqSigPart2' },
+    { type: 'redacted_thinking', data: 'ENCRYPTED' },
+    { type: 'tool_use', id: 'toolu-9', name: 'bash', input: {} },
+  ])
+
+  const otherModel = toAnthropicMessages(history('claude-sonnet-5'), { provider: 'claude', model: 'claude-opus-5' })
+  assert.deepEqual(otherModel[1].content.map(block => block.type), ['tool_use'], 'a foreign signature is never sent')
+
+  const rewritten = toAnthropicMessages(
+    history('claude-opus-5', [{ type: 'reasoning', text: 'edited' }, blocks[1]]),
+    { provider: 'claude', model: 'claude-opus-5' },
+  )
+  assert.deepEqual(rewritten[1].content.map(block => block.type), ['redacted_thinking', 'tool_use'],
+    'reasoning whose text no longer matches its signature is dropped')
+
+  const noScope = toAnthropicMessages(history('claude-opus-5'))
+  assert.deepEqual(noScope[1].content.map(block => block.type), ['tool_use'])
+})
+
+test('markMessageCache never marks a thinking block', () => {
+  const messages: AnthropicMessage[] = [
+    { role: 'assistant', content: [{ type: 'text', text: 'a' }, { type: 'thinking', thinking: 't', signature: 's' }] },
+  ]
+  markMessageCache(messages, 1)
+  assert.equal(messages[0].content[1].cache_control, undefined)
+  assert.deepEqual(messages[0].content[0].cache_control, { type: 'ephemeral' })
+})
+
+test('Anthropic translator: refusal fails with its explanation; context-window stop truncates', () => {
+  const refused = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 5 } } },
+    { type: 'message_delta', delta: { stop_reason: 'refusal', stop_details: { explanation: 'policy' } }, usage: { output_tokens: 0 } },
+    { type: 'message_stop' },
+  ])
+  assert.deepEqual(refused.at(-1), {
+    type: 'finish',
+    reason: { kind: 'error', failure: { message: 'Claude declined to continue: policy', code: 'CONTENT_FILTER' } },
+  })
+  const truncated = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 5 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'model_context_window_exceeded' }, usage: { output_tokens: 1 } },
+    { type: 'message_stop' },
+  ])
+  assert.deepEqual(truncated.at(-1), { type: 'finish', reason: { kind: 'max-tokens' } })
+})
+
+test('toAnthropicMessages drops whitespace-only text blocks', () => {
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'hi' }]),
+    message('assistant', [{ type: 'text', text: '  \n' }, toolCall('c1', 'bash', '{}')]),
+  ])
+  assert.deepEqual(messages[1].content.map(block => block.type), ['tool_use'])
+})
+
+test('reconcileAnthropicToolPairs answers dangling calls and demotes orphan results', () => {
+  const balanced: AnthropicMessage[] = [
+    { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'x', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: 'ok' }] },
+  ]
+  assert.deepEqual(reconcileAnthropicToolPairs(balanced), balanced, 'a balanced history is untouched')
+
+  const repaired = reconcileAnthropicToolPairs([
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'ghost', content: 'stale' }, { type: 'text', text: 'go' }] },
+    { role: 'assistant', content: [
+      { type: 'tool_use', id: 'a', name: 'x', input: {} },
+      { type: 'tool_use', id: 'b', name: 'x', input: {} },
+    ] },
+    { role: 'user', content: [{ type: 'text', text: 'interrupted' }, { type: 'tool_result', tool_use_id: 'a', content: 'ok' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'c', name: 'x', input: {} }] },
+  ])
+  assert.deepEqual(repaired[0].content, [
+    { type: 'text', text: '[tool result ghost: stale]' },
+    { type: 'text', text: 'go' },
+  ])
+  assert.deepEqual(repaired[2].content, [
+    { type: 'tool_result', tool_use_id: 'b', content: CLAUDE_UNKNOWN_TOOL_OUTCOME, is_error: true },
+    { type: 'tool_result', tool_use_id: 'a', content: 'ok' },
+    { type: 'text', text: 'interrupted' },
+  ], 'results lead the turn; the missing one is supplied')
+  assert.deepEqual(repaired[4], {
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: 'c', content: CLAUDE_UNKNOWN_TOOL_OUTCOME, is_error: true }],
+  }, 'a trailing dangling call gets its own answering turn')
 })

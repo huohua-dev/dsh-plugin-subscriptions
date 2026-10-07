@@ -24,6 +24,7 @@ import {
   MESSAGE_CACHE_BREAKPOINTS,
   TRAILING_USER_PLACEHOLDER,
   markMessageCache,
+  reconcileAnthropicToolPairs,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -607,7 +608,14 @@ export function claudeRequestBody(
   thinking?: Record<string, unknown>,
   effort?: string,
 ): Record<string, unknown> {
-  const anthropicMessages = toAnthropicMessages(messages)
+  // Only this route/model's own signed thinking is replayed: a signature
+  // verifies solely against the model that issued it. An interrupted or
+  // compacted turn can leave a tool_use unanswered (or a result with no
+  // call), which Anthropic rejects on every later turn, so the request is
+  // repaired — the durable history is not.
+  const anthropicMessages = reconcileAnthropicToolPairs(
+    toAnthropicMessages(messages, { provider: options.provider, model: options.model }),
+  )
   // A body ending on an assistant turn reads as prefill, which newer models
   // reject. Prefill the harness chose itself (its last message is an
   // assistant one) is passed through; a trailing turn lost in translation —

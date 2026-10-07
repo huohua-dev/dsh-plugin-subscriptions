@@ -540,7 +540,7 @@ test('toAnthropicSystem: Claude Code identity first, then explicit and history s
   assert.deepEqual(blocks, [
     { type: 'text', text: CLAUDE_CODE_IDENTITY },
     { type: 'text', text: 'explicit' },
-    { type: 'text', text: 'from history', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'from history', cache_control: { type: 'ephemeral', ttl: '1h' } },
   ])
   assert.equal(toAnthropicSystem().length, 1, 'the identity block is always present')
 })
@@ -554,7 +554,7 @@ test('toAnthropicSystem hoists only the system messages that precede the convers
   assert.deepEqual(toAnthropicSystem('explicit', history), [
     { type: 'text', text: CLAUDE_CODE_IDENTITY },
     { type: 'text', text: 'explicit' },
-    { type: 'text', text: 'opening', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'opening', cache_control: { type: 'ephemeral', ttl: '1h' } },
   ], 'a later system message must not move in front of the cached history')
 })
 
@@ -576,7 +576,7 @@ test('toAnthropicSystem marks its last block as the tools+system breakpoint', ()
   const blocks = toAnthropicSystem('explicit')
   assert.deepEqual(blocks, [
     { type: 'text', text: CLAUDE_CODE_IDENTITY },
-    { type: 'text', text: 'explicit', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'explicit', cache_control: { type: 'ephemeral', ttl: '1h' } },
   ])
 })
 
@@ -628,14 +628,14 @@ test('an all-system history hoists everything and leaves no messages', () => {
   assert.deepEqual(toAnthropicSystem(undefined, history), [
     { type: 'text', text: CLAUDE_CODE_IDENTITY },
     { type: 'text', text: 'first' },
-    { type: 'text', text: 'second', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'second', cache_control: { type: 'ephemeral', ttl: '1h' } },
   ])
   assert.deepEqual(toAnthropicMessages(history), [])
 })
 
 test('toAnthropicSystem marks the identity block when it is the only one', () => {
   assert.deepEqual(toAnthropicSystem(), [
-    { type: 'text', text: CLAUDE_CODE_IDENTITY, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: CLAUDE_CODE_IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
   ])
 })
 
@@ -649,9 +649,9 @@ test('markMessageCache marks a tool_result block when the turn ends on one', () 
   assert.deepEqual(content[1].cache_control, { type: 'ephemeral' })
 })
 
-test('toAnthropicTools maps to input_schema tools', () => {
+test('toAnthropicTools maps to input_schema tools and anchors the last one', () => {
   assert.deepEqual(toAnthropicTools([{ name: 'bash', description: 'run', parameters: { type: 'object' } }]), [
-    { name: 'bash', description: 'run', input_schema: { type: 'object' } },
+    { name: 'bash', description: 'run', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral', ttl: '1h' } },
   ])
 })
 
@@ -662,8 +662,8 @@ test('toAnthropicTools sorts by name so the tools prefix survives registration o
   ]
   assert.deepEqual(toAnthropicTools(schemas), [
     { name: 'bash', description: 'run', input_schema: { type: 'object' } },
-    { name: 'write', description: 'write a file', input_schema: { type: 'object' } },
-  ])
+    { name: 'write', description: 'write a file', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral', ttl: '1h' } },
+  ], 'the last tool in wire order carries the prefix anchor')
   assert.deepEqual(
     toAnthropicTools([...schemas].reverse()),
     toAnthropicTools(schemas),

@@ -673,12 +673,20 @@ test('claudeRequestBody ships the cache breakpoints and never exceeds four', () 
   )
   const system = body.system as Record<string, unknown>[]
   const messages = body.messages as { content: Record<string, unknown>[] }[]
-  const marked = [...system, ...messages.flatMap(entry => entry.content)]
+  const tools = body.tools as Record<string, unknown>[]
+  const marked = [...system, ...tools, ...messages.flatMap(entry => entry.content)]
     .filter(block => block.cache_control !== undefined)
-  assert.equal(marked.length, 4, 'one on system plus three across the history is Anthropic\'s maximum')
-  assert.deepEqual(system[system.length - 1].cache_control, { type: 'ephemeral' }, 'the tools+system prefix is cached')
+  assert.equal(marked.length, 4, 'two prefix anchors plus the history marks stay at Anthropic\'s maximum')
+  assert.deepEqual(system[system.length - 1].cache_control, { type: 'ephemeral', ttl: '1h' }, 'the tools+system prefix is cached')
+  assert.deepEqual(tools[tools.length - 1].cache_control, { type: 'ephemeral', ttl: '1h' }, 'the last tool anchors the same prefix')
+  assert.equal(tools[0].cache_control, undefined, 'only one tool anchor')
+  assert.equal(
+    messages.flatMap(entry => entry.content).filter(block => block.cache_control !== undefined).length,
+    2,
+    'the history gets the rest of the four-slot budget on the 5m default',
+  )
   assert.deepEqual(
-    (body.tools as { name: string }[]).map(tool => tool.name),
+    tools.map(tool => tool.name),
     ['bash', 'write'],
     'tools ride in name order',
   )

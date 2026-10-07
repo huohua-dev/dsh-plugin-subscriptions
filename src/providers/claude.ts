@@ -21,12 +21,29 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
 import type { TranslatableMessage } from '../translate/resolved.js'
 import {
+  MESSAGE_CACHE_BREAKPOINTS,
+  TRAILING_USER_PLACEHOLDER,
   markMessageCache,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
 } from '../translate/anthropic.js'
+import {
+  applyClaudeCodeIdentity,
+  claudeCliUserAgent,
+  claudeRequestHeaders,
+} from './claude-identity.js'
+export {
+  CLAUDE_ENTRYPOINT,
+  applyClaudeCodeIdentity,
+  claudeBetaFlags,
+  claudeBillingHeader,
+  claudeCliUserAgent,
+  claudeFakeUserId,
+  claudeRequestHeaders,
+  claudeStainlessHeaders,
+} from './claude-identity.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -155,11 +172,6 @@ export function claudeCliVersionFloor(detect: () => string = detectClaudeVersion
     : { version: CLAUDE_CLI_FALLBACK_VERSION, source: 'fallback' }
 }
 
-/** The User-Agent Claude Code sends at `version`. */
-export function claudeCliUserAgent(version: string): string {
-  return `claude-cli/${version} (external, cli)`
-}
-
 // Lazy + memoized: the floor shells out to `claude --version`, so this must
 // not run at module-evaluation time (it would fire for every consumer of this
 // module regardless of whether Claude is a configured provider). Used when no
@@ -169,17 +181,6 @@ async function localClaudeCliVersion(): Promise<string> {
   localCliVersion ??= claudeCliVersionFloor().version
   return localCliVersion
 }
-export const CLAUDE_BETA_FALLBACK = [
-  'claude-code-20250219',
-  'oauth-2025-04-20',
-  'interleaved-thinking-2025-05-14',
-  'context-management-2025-06-27',
-  'effort-2025-11-24',
-  'compact-2026-01-12',
-  'files-api-2025-04-14',
-].join(',')
-
-const CLAUDE_BETA_FLAGS = CLAUDE_BETA_FALLBACK
 
 /** Static claude flow facts for the OAuth flow engine. */
 export const claudeFlow: FlowSpec = {
@@ -543,6 +544,7 @@ export interface ClaudeAdapterOptions {
   pool?: () => PoolAdapter | undefined
   /** Whether to fetch the live catalog when logged in (false when config `models` overrides). */
   discovery: boolean
+  /** Fetch implementation (injectable for tests); defaults to the proxied fetch. */
   fetchFn?: FetchFn
   onWarn?: (message: string) => void
   /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
@@ -586,9 +588,11 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  *
  * Extracted from the adapter so the wire shape — cache breakpoints above all —
  * is testable without a network round trip. The message array is marked before
- * it is placed so the breakpoints land on the blocks the body ships: one on the
- * last `system` block (covering `tools` + `system`, which render ahead of it)
- * and up to three across the history, Anthropic's four-slot maximum.
+ * it is placed so the breakpoints land on the blocks the body ships: a 1h
+ * anchor on the last `system` block and on the last tool (together caching the
+ * `tools` + `system` prefix), and the rest of Anthropic's four-slot budget
+ * across the history on the 5m default. The client identity (`metadata`,
+ * billing block) is applied afterwards by {@link applyClaudeCodeIdentity}.
  * @param options - the generate request.
  * @param messages - conversation messages with images already resolved.
  * @param maxTokens - the resolved output cap.
@@ -604,19 +608,30 @@ export function claudeRequestBody(
   effort?: string,
 ): Record<string, unknown> {
   const anthropicMessages = toAnthropicMessages(messages)
-  markMessageCache(anthropicMessages)
+  // A body ending on an assistant turn reads as prefill, which newer models
+  // reject. Prefill the harness chose itself (its last message is an
+  // assistant one) is passed through; a trailing turn lost in translation —
+  // a skipped unresolved image block — is restored with a placeholder.
+  if (
+    anthropicMessages.length > 0
+    && anthropicMessages[anthropicMessages.length - 1].role === 'assistant'
+    && messages[messages.length - 1]?.role !== 'assistant'
+  ) {
+    anthropicMessages.push({ role: 'user', content: [{ type: 'text', text: TRAILING_USER_PLACEHOLDER }] })
+  }
+  const tools = options.tools !== undefined && options.tools.length > 0
+    ? toAnthropicTools(options.tools)
+    : undefined
+  markMessageCache(anthropicMessages, MESSAGE_CACHE_BREAKPOINTS - (tools === undefined ? 0 : 1))
   return {
     model: options.model,
     max_tokens: maxTokens,
     system: toAnthropicSystem(options.system, messages),
     messages: anthropicMessages,
-    ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toAnthropicTools(options.tools) }
-      : {},
+    ...tools === undefined ? {} : { tools },
     ...thinking === undefined ? {} : { thinking },
     ...effort === undefined ? {} : { output_config: { effort } },
     stream: true,
-    ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
   }
 }
 
@@ -856,19 +871,28 @@ export class ClaudeAdapter extends LlmAdapter {
       : undefined
     const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
     const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
-    return proxiedFetch(CLAUDE_API_URL, {
+    // Anthropic routes OAuth traffic by the request's Claude Code presentation:
+    // the billing-attribution token at system[0] and the CLI metadata are what
+    // put a request on the subscription plan instead of the third-party
+    // extra-usage lane, so they are applied before the body is serialized and
+    // the header set echoes the same session id and version.
+    const identity = applyClaudeCodeIdentity(
+      body,
+      session.accessToken,
+      cliVersion,
+      options.sessionId === undefined ? undefined : String(options.sessionId),
+      session.emailAddress ?? session.accessToken,
+    )
+    return (this.options.fetchFn ?? proxiedFetch)(CLAUDE_API_URL, {
       method: 'POST',
-      headers: {
-        'authorization': `Bearer ${session.accessToken}`,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': CLAUDE_BETA_FLAGS,
-        'user-agent': claudeCliUserAgent(cliVersion),
-        'x-app': 'cli',
-        'anthropic-dangerous-direct-browser-access': 'true',
-        'accept': 'text/event-stream',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
+      headers: claudeRequestHeaders(
+        session.accessToken,
+        cliVersion,
+        options.model,
+        thinking?.display === 'summarized',
+        identity.sessionHeaderId,
+      ),
+      body: JSON.stringify(identity.body),
       signal,
     })
   }

@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import {
   detectClaudeVersion,
   CLAUDE_CLI_FALLBACK_VERSION,
-  CLAUDE_BETA_FALLBACK,
+  claudeBetaFlags,
 } from '../src/providers/claude.js'
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ test('detectClaudeVersion fallback is new enough for currently gated models', ()
 })
 
 // ---------------------------------------------------------------------------
-// CLAUDE_BETA_FALLBACK
+// claudeBetaFlags
 // ---------------------------------------------------------------------------
 
 const EXPECTED_FLAGS = [
@@ -72,22 +72,25 @@ const EXPECTED_FLAGS = [
   'oauth-2025-04-20',
   'interleaved-thinking-2025-05-14',
   'context-management-2025-06-27',
-  'effort-2025-11-24',
-  'compact-2026-01-12',
-  'files-api-2025-04-14',
+  'prompt-caching-scope-2026-01-05',
+  'structured-outputs-2025-12-15',
+  'fast-mode-2026-02-01',
+  'redact-thinking-2026-02-12',
+  'token-efficient-tools-2026-03-28',
 ]
 
-test('CLAUDE_BETA_FALLBACK is a well-formed comma-separated flag list', () => {
-  assert.ok(CLAUDE_BETA_FALLBACK.length > 0, 'must not be empty')
-  assert.ok(!CLAUDE_BETA_FALLBACK.startsWith(',') && !CLAUDE_BETA_FALLBACK.endsWith(','), 'no leading/trailing commas')
-  for (const flag of CLAUDE_BETA_FALLBACK.split(',')) {
+test('claudeBetaFlags is a well-formed comma-separated flag list', () => {
+  const header = claudeBetaFlags('claude-haiku-4-5-20251001')
+  assert.ok(header.length > 0, 'must not be empty')
+  assert.ok(!header.startsWith(',') && !header.endsWith(','), 'no leading/trailing commas')
+  for (const flag of header.split(',')) {
     // Dates appear both dashed (oauth-2025-04-20) and compact (claude-code-20250219).
     assert.match(flag, /^[a-z][\w-]+-\d{4}-?\d{2}-?\d{2}$/, `malformed flag: "${flag}"`)
   }
 })
 
-test('CLAUDE_BETA_FALLBACK contains exactly the live-verified flag set', () => {
-  const flags = CLAUDE_BETA_FALLBACK.split(',')
+test('claudeBetaFlags base set matches the live-verified flag set', () => {
+  const flags = claudeBetaFlags('claude-haiku-4-5-20251001').split(',')
   for (const expected of EXPECTED_FLAGS) {
     assert.ok(flags.includes(expected), `missing expected flag: ${expected}`)
   }

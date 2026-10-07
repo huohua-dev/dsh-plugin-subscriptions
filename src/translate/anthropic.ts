@@ -42,12 +42,23 @@ export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 export const CACHE_BLOCK_STRIDE = 15
 
 /**
- * Message breakpoints per request. Anthropic allows four in total and the
- * last `system` block takes the fourth, so three are left for the history —
- * enough to tolerate a turn appending roughly {@link CACHE_BLOCK_STRIDE} × 3
- * blocks before a read is lost.
+ * Message breakpoints per request. Anthropic allows four in total: the last
+ * `system` block and the last tool hold the tools+system prefix, so the
+ * history gets the rest — enough to tolerate a turn appending roughly {@link
+ * CACHE_BLOCK_STRIDE} × 2 blocks before a read is lost.
  */
 export const MESSAGE_CACHE_BREAKPOINTS = 3
+
+/** The 1h anchor Claude Code pins the tools+system prefix with. */
+export const CACHE_CONTROL_1H = { type: 'ephemeral', ttl: '1h' } as const
+
+/**
+ * The user turn appended when translation would otherwise leave the body
+ * ending on an assistant turn. Newer models reject assistant prefill, and the
+ * harness can lose its trailing turn here (an unresolved image block is
+ * skipped), leaving the previous assistant reply as the body's last word.
+ */
+export const TRAILING_USER_PLACEHOLDER = 'Continue.'
 
 /** One Anthropic request message. */
 export interface AnthropicMessage {
@@ -225,18 +236,20 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
 
 /**
  * Mark the conversation's cache breakpoints in place: the last content block,
- * then one every {@link CACHE_BLOCK_STRIDE} blocks backwards, {@link
- * MESSAGE_CACHE_BREAKPOINTS} in total.
+ * then one every {@link CACHE_BLOCK_STRIDE} blocks backwards, `marks` in total.
  *
  * The history is append-only, so the block one request marks last is
  * byte-identical in the next — that entry is what the next request reads.
  * Marks are counted across the flattened block sequence, not per message,
  * because the lookback window Anthropic walks counts blocks the same way.
  * @param messages - assembled Anthropic messages, marked in place.
+ * @param marks - breakpoints to place; defaults to {@link
+ * MESSAGE_CACHE_BREAKPOINTS}, the budget left for the history once the system
+ * and tool anchors are placed (Anthropic allows four markers per request).
  */
-export function markMessageCache(messages: readonly AnthropicMessage[]): void {
+export function markMessageCache(messages: readonly AnthropicMessage[], marks = MESSAGE_CACHE_BREAKPOINTS): void {
   const blocks = messages.flatMap(message => message.content)
-  for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS; mark++) {
+  for (let mark = 0; mark < marks; mark++) {
     const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
     if (at < 0) return
     blocks[at].cache_control = { type: 'ephemeral' }
@@ -263,7 +276,9 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
   // `tools` renders ahead of `system`, so this one marker caches both. It is
   // deliberately separate from the message marks: a tool_choice or thinking
   // change invalidates the messages tier only, and this entry survives it.
-  blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
+  // The 1h TTL is what Claude Code pins the tools+system prefix with; the
+  // conversation marks stay on the 5m default.
+  blocks[blocks.length - 1].cache_control = { ...CACHE_CONTROL_1H }
   return blocks
 }
 
@@ -275,17 +290,21 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
  * conversation included. Registration order belongs to the caller and plugin
  * load order can differ between processes, so the wire order is fixed here
  * instead. Anthropic selects a tool by name; the array order carries nothing.
+ * The last entry carries the 1h anchor for the tools+system prefix — one
+ * marker here rather than one per tool keeps the four-marker budget intact.
  * @param tools - tool schemas from the request.
  * @returns Anthropic `tools` array entries, ordered by tool name.
  */
 export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
-  return [...tools]
+  const sorted: Record<string, unknown>[] = [...tools]
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
     .map(tool => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.parameters,
     }))
+  if (sorted.length > 0) sorted[sorted.length - 1].cache_control = { ...CACHE_CONTROL_1H }
+  return sorted
 }
 
 /** The subset of Anthropic SSE event shapes this translator reads. */

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { LlmError, MessageId, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
 import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../src/compat.js'
 import type { MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -750,6 +750,22 @@ test('Anthropic translator: error event mapping', () => {
   assert.throws(
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+  // A request-shape failure must not land in the retryable SERVER bucket.
+  const invalid = new AnthropicStreamTranslator()
+  assert.throws(
+    () => invalid.push({ type: 'error', error: { type: 'invalid_request_error', message: 'bad field' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'INVALID_REQUEST',
+  )
+  const permission = new AnthropicStreamTranslator()
+  assert.throws(
+    () => permission.push({ type: 'error', error: { type: 'permission_error', message: 'no access' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+  const billing = new AnthropicStreamTranslator()
+  assert.throws(
+    () => billing.push({ type: 'error', error: { type: 'billing_error', message: 'no credit' } }),
+    (error: unknown) => error instanceof LlmError && error.code === QUOTA_EXCEEDED_CODE,
   )
 })
 

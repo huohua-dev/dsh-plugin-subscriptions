@@ -423,7 +423,8 @@ export async function fetchClaudeUsage(
   return { supported: true, windows }
 }
 
-interface ClaudeModelCapabilities {
+/** The `capabilities` object of one `/v1/models` entry (subset). */
+export interface ClaudeModelCapabilities {
   thinking?: {
     types?: {
       enabled?: { supported?: boolean }
@@ -440,10 +441,17 @@ interface ClaudeModelCapabilities {
   }
 }
 
-function claudeThinkingType(capabilities: ClaudeModelCapabilities | undefined): 'enabled' | 'adaptive' | undefined {
+/**
+ * The thinking mode to request. Adaptive wins wherever it is offered: manual
+ * `enabled` + `budget_tokens` is deprecated on the 4.6 models (which accept
+ * both) and rejected from 4.7 on, and adaptive is what Claude Code sends —
+ * depth is then steered by `output_config.effort` rather than a fixed budget.
+ * The 4.5-and-earlier models advertise `enabled` only and keep it.
+ */
+export function claudeThinkingType(capabilities: ClaudeModelCapabilities | undefined): 'enabled' | 'adaptive' | undefined {
   const types = capabilities?.thinking?.types
-  if (types?.enabled?.supported === true) return 'enabled'
   if (types?.adaptive?.supported === true) return 'adaptive'
+  if (types?.enabled?.supported === true) return 'enabled'
   return undefined
 }
 
@@ -457,6 +465,29 @@ function claudeReasoning(capabilities: ClaudeModelCapabilities | undefined): Dis
     .filter(level => effort[level]?.supported === true)
     .map(level => ({ id: ReasoningEffortId(level), name: level[0].toUpperCase() + level.slice(1) }))
   return efforts.length > 0 ? { efforts } : undefined
+}
+
+/**
+ * The effort level to send for one request, fitted to the model's advertised
+ * levels. A session's effort survives a model switch, and Anthropic rejects a
+ * level the model lacks with HTTP 400 (`xhigh` on the 4.6 models, say), so an
+ * unsupported level falls to the highest advertised one below it — or the
+ * lowest advertised one when nothing is below. A value outside the Claude
+ * scale is not sent at all.
+ * @param requested - the harness's reasoning effort.
+ * @param reasoning - the model's discovered reasoning capability.
+ * @returns the level to put in `output_config.effort`, or undefined to omit it.
+ */
+export function claudeEffort(requested: string | undefined, reasoning: DiscoveredModel['reasoning']): string | undefined {
+  if (requested === undefined || reasoning === undefined) return undefined
+  const supported = new Set(reasoning.efforts.map(entry => String(entry.id)))
+  if (supported.has(requested)) return requested
+  const rank = (CLAUDE_EFFORT_LEVELS as readonly string[]).indexOf(requested)
+  if (rank === -1) return undefined
+  const ordered = CLAUDE_EFFORT_LEVELS.filter(level => supported.has(level))
+  if (ordered.length === 0) return undefined
+  const below = ordered.filter(level => CLAUDE_EFFORT_LEVELS.indexOf(level) < rank)
+  return below.length > 0 ? below[below.length - 1] : ordered[0]
 }
 
 /** One entry of the `/v1/models` response; only the fields the plugin reads. */
@@ -871,12 +902,18 @@ export class ClaudeAdapter extends LlmAdapter {
       }
     }
     const disc = await this.discovered(options.model)
-    const maxTokens = options.maxTokens
-      ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
+    // A caller-chosen cap (compaction, a cap carried over from another model)
+    // may exceed this model's advertised ceiling, which Anthropic rejects
+    // with HTTP 400; the ceiling applies to it like to the default.
+    const outputLimit = disc?.maxOutputTokens
+    const maxTokens = options.maxTokens === undefined
+      ? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
+      : outputLimit === undefined ? options.maxTokens : Math.min(options.maxTokens, outputLimit)
     const thinking = this.thinkingParam(disc?.thinkingType, maxTokens)
-    const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
-      ? String(options.reasoningEffort)
-      : undefined
+    const effort = claudeEffort(
+      options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort),
+      disc?.reasoning,
+    )
     const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
     const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
     // Anthropic routes OAuth traffic by the request's Claude Code presentation:

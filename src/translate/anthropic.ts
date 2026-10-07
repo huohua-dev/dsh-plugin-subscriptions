@@ -10,6 +10,7 @@ import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmError,
+  QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
 import type {
@@ -556,12 +557,26 @@ function closeBlock(block: OpenBlock): ContentBlock {
 export function anthropicFailure(error: { type?: string; message?: string } | undefined): LlmError {
   const type = error?.type ?? 'unknown_error'
   const message = error?.message ?? `Anthropic reported ${type}`
-  if (type === 'invalid_request_error' && /prompt is too long/i.test(message)) {
-    return new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE)
+  switch (type) {
+    case 'invalid_request_error':
+      if (/prompt is too long/i.test(message)) return new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE)
+      // The request itself is at fault: resending it verbatim fails the same
+      // way, so it must stay outside the retryable SERVER code.
+      return new LlmError(message, 'INVALID_REQUEST')
+    case 'not_found_error':
+    case 'request_too_large':
+      return new LlmError(message, 'INVALID_REQUEST')
+    case 'rate_limit_error':
+      return new LlmError(message, 'RATE_LIMIT')
+    case 'authentication_error':
+    case 'permission_error':
+      return new LlmError(message, 'AUTH')
+    case 'billing_error':
+      return new LlmError(message, QUOTA_EXCEEDED_CODE)
+    default:
+      // overloaded_error, api_error, and unknown types are transient.
+      return new LlmError(message, 'SERVER')
   }
-  if (type === 'rate_limit_error') return new LlmError(message, 'RATE_LIMIT')
-  if (type === 'authentication_error') return new LlmError(message, 'AUTH')
-  return new LlmError(message, 'SERVER')
 }
 
 /**

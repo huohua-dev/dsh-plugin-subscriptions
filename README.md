@@ -104,20 +104,13 @@ With the `dsh` CLI available, install from npm (prebuilt artifacts, no build per
 dsh plugin --profile web add dsh-plugin-subscriptions
 ```
 
-Or install the sources from GitHub:
+Or install the prebuilt `dist` branch from GitHub (also no build permission needed):
 
 ```sh
-dsh plugin --profile web add github:V1ki/dsh-plugin-subscriptions
+dsh plugin --profile web add github:huohua-dev/dsh-plugin-subscriptions#dist
 ```
 
-pnpm will ask you to allow this package's build script on first install (git installs fetch sources, not built artifacts); add the printed key to the profile's `pnpm-workspace.yaml`:
-
-```yaml
-allowBuilds:
-  dsh-plugin-subscriptions: true
-```
-
-and re-run the `add`. Only grant this to packages you trust — it runs the package's code at install time.
+The `dist` branch is rebuilt by GitHub Actions ([`dist.yml`](.github/workflows/dist.yml)) on every push to `main`: it contains the built `lib/` and a `package.json` without lifecycle scripts, so pnpm has nothing to build. Installing the bare repository (without `#dist`) fetches the sources instead, and pnpm 11 then refuses to run their `prepare` build until the profile's `pnpm-workspace.yaml` lists `allowBuilds` for that exact commit — a new entry for every commit, which is why `#dist` is recommended.
 
 From a local checkout instead:
 
@@ -142,7 +135,7 @@ Installed from npm:
 dsh plugin --profile web update --latest dsh-plugin-subscriptions
 ```
 
-Installed from GitHub: re-run the same `add github:V1ki/dsh-plugin-subscriptions` command — it re-fetches the sources and rebuilds. A linked local checkout just needs `git pull && pnpm build` in the checkout.
+Installed from GitHub: re-run the same `add github:huohua-dev/dsh-plugin-subscriptions#dist` command — it re-resolves the branch to its latest prebuilt commit. A linked local checkout just needs `git pull && pnpm build` in the checkout.
 
 Either way, restart `dsh web` afterwards so the new version loads.
 
@@ -292,7 +285,9 @@ For the optional offline quota UI check, point `PLAYWRIGHT_PATH` at an installed
 
 The pnpm package extension supplies the published UI primitives' browser dependencies for Node component tests. DSH supplies those libraries to the browser at runtime.
 
-`prepare` (used by git installs) runs `tsdown.prepare.config.ts`: a self-contained bundle build of both faces with all `@deepseek-ai/*` specifiers external — they resolve from the dsh installation at runtime, so this package never carries a second cordis copy.
+`node scripts/make-dist.mjs <outDir>` (run by `dist.yml` after `pnpm build` and `pnpm test`) assembles the `dist` branch tree: `lib/`, `cordis.patch.yml`, docs, and the manifest stripped of scripts, dev dependencies, and pnpm settings.
+
+`prepare` (used by source git installs without `#dist`) runs `tsdown.prepare.config.ts`: a self-contained bundle build of both faces with all `@deepseek-ai/*` specifiers external — they resolve from the dsh installation at runtime, so this package never carries a second cordis copy.
 
 After `pnpm build`, restart `dsh web` to pick up changes.
 

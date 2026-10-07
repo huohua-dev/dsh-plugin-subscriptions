@@ -103,20 +103,13 @@ Claude 请求以 Claude Code 的身份发出，接口会按 Claude Code 版本�
 dsh plugin --profile web add dsh-plugin-subscriptions
 ```
 
-也可以从 GitHub 安装源码:
+也可以从 GitHub 安装预构建的 `dist` 分支(同样无需构建授权):
 
 ```sh
-dsh plugin --profile web add github:V1ki/dsh-plugin-subscriptions
+dsh plugin --profile web add github:huohua-dev/dsh-plugin-subscriptions#dist
 ```
 
-首次安装 pnpm 会要求允许该包的构建脚本(git 安装拉取的是源码而非构建产物);把打印出的包名加进 profile 的 `pnpm-workspace.yaml`:
-
-```yaml
-allowBuilds:
-  dsh-plugin-subscriptions: true
-```
-
-然后重新执行 `add`。该授权会在安装时执行包的代码,只授给你信任的来源。
+`dist` 分支由 GitHub Actions([`dist.yml`](.github/workflows/dist.yml))在每次 push 到 `main` 后自动重建:里面是构建好的 `lib/` 和去掉了生命周期脚本的 `package.json`,pnpm 无需执行任何构建。如果不带 `#dist` 直接安装仓库,拉到的是源码,pnpm 11 会拒绝执行其中的 `prepare` 构建,直到 profile 的 `pnpm-workspace.yaml` 里的 `allowBuilds` 列出**这一个 commit** —— 每个新 commit 都要重新加一条,所以推荐用 `#dist`。
 
 本地检出安装:
 
@@ -141,7 +134,7 @@ npm 安装的:
 dsh plugin --profile web update --latest dsh-plugin-subscriptions
 ```
 
-GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` —— 会重新拉取源码并构建。link 的本地检出只需在检出目录里 `git pull && pnpm build`。
+GitHub 安装的:重新执行一遍 `add github:huohua-dev/dsh-plugin-subscriptions#dist` —— 会把分支重新解析到最新的预构建 commit。link 的本地检出只需在检出目录里 `git pull && pnpm build`。
 
 无论哪种方式,更新后都要重启 `dsh web` 才会加载新版本。
 
@@ -286,7 +279,9 @@ pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
 
-`prepare`(git 安装时触发)执行 `tsdown.prepare.config.ts`:自包含打包两个面,所有 `@deepseek-ai/*` 依赖外部化 —— 运行时从 dsh 安装解析,保证不会引入第二份 cordis。
+`node scripts/make-dist.mjs <输出目录>`(由 `dist.yml` 在 `pnpm build`、`pnpm test` 之后执行)组装 `dist` 分支的内容:`lib/`、`cordis.patch.yml`、文档,以及去掉 scripts、devDependencies 和 pnpm 配置的 manifest。
+
+`prepare`(不带 `#dist` 的源码 git 安装时触发)执行 `tsdown.prepare.config.ts`:自包含打包两个面,所有 `@deepseek-ai/*` 依赖外部化 —— 运行时从 dsh 安装解析,保证不会引入第二份 cordis。
 
 pnpm 的 package extension 为 Node 组件测试补齐已发布 UI primitives 的浏览器依赖；实际浏览器运行时仍由 DSH 提供这些库。
 

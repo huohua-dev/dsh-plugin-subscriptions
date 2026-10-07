@@ -1,0 +1,85 @@
+# Maintain the prebuilt `dist` branch for git installs.
+#
+# `dsh plugin add github:<owner>/dsh-plugin-subscriptions` installs through
+# pnpm 11, which refuses to run a git dependency's `prepare` build unless the
+# profile's `allowBuilds` names that exact commit tarball — a new manual entry
+# for every commit. Installing `#dist` instead fetches a tree that already
+# contains `lib/` and a manifest without lifecycle scripts, so there is nothing
+# to build or approve:
+#
+#   dsh plugin --profile web add github:<owner>/dsh-plugin-subscriptions#dist
+#
+# Every push to main builds and tests from a clean checkout, then commits the
+# result on top of `dist` (history is kept so earlier lockfile pins stay
+# fetchable). The commit message names the source commit.
+name: Dist branch
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dist-branch
+  cancel-in-progress: false
+
+jobs:
+  dist:
+    name: Build and publish the dist branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write   # push the dist branch
+    steps:
+      - name: Check out ${{ github.sha }}
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm (version from package.json `packageManager`)
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Assemble the dist tree
+        run: node scripts/make-dist.mjs "$RUNNER_TEMP/dist"
+
+      - name: Commit and push the dist branch
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          wt="$RUNNER_TEMP/dist-worktree"
+          if git ls-remote --exit-code --heads origin dist >/dev/null; then
+            git fetch --no-tags --depth=1 origin +refs/heads/dist:refs/remotes/origin/dist
+            git worktree add -B dist "$wt" origin/dist
+          else
+            git worktree add --detach "$wt"
+            git -C "$wt" switch --orphan dist
+          fi
+          find "$wt" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R "$RUNNER_TEMP/dist/." "$wt/"
+          git -C "$wt" add -A
+          if git -C "$wt" diff --cached --quiet; then
+            echo "dist is already up to date with ${SOURCE_SHA}"
+            exit 0
+          fi
+          version="$(node -p "require('$RUNNER_TEMP/dist/package.json').version")"
+          git -C "$wt" commit -q -m "dist: v${version} built from ${SOURCE_SHA}"
+          git -C "$wt" push origin dist
+          echo "Published dist $(git -C "$wt" rev-parse --short HEAD) from ${SOURCE_SHA}"

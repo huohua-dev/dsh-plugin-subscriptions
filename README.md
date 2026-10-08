@@ -155,7 +155,7 @@ Every provider accepts several accounts: once one is connected, the card grows a
 
 Open **Settings → Subscriptions → provider → Edit model list**, search and select models, then **Save changes**. All discovered models are shown automatically by default. Selecting individual models, selecting all, or clearing the selection saves an explicit list; newly discovered models then stay hidden until selected. Enable automatic display again to restore discovery-driven visibility. Hidden models remain usable by existing sessions, and the editor retains the full catalog so they can be restored. Refreshing discovery preserves preferences. The dialog has one **Save changes** / **Cancel** pair: Save submits the model list together with the account settings above it, and Cancel discards both and closes the dialog.
 
-Codex models also accept a context budget in tokens; leave it blank to follow the provider. The plugin reads each account's `context_window` and `max_context_window`, caps the requested budget at that account's maximum, and uses the advertised default as the conservative ceiling when no maximum is provided. Account pools resolve each member separately and use the smallest window. This changes DSH's local history budget and compaction timing, without sending an API capacity override. Longer contexts can increase response latency.
+Codex models also accept a context budget in tokens. The plugin reads each account's `context_window` (standard) and `max_context_window` (maximum). Both are input-token limits, so the plugin adds the 128K output reservation to express them as DSH's combined window: the GPT-5 family's 272K/872K become 400K/1M. A blank field uses the account's maximum. Enter a smaller value, such as the standard window, to compact earlier; requests above the standard window may consume more plan quota. A requested budget is capped at that account's maximum, and the standard window is the ceiling when no maximum is advertised. Account pools resolve each member separately and use the smallest window. This changes DSH's local history budget and compaction timing, without sending an API capacity override. Longer contexts can increase response latency.
 
 The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
 
@@ -180,7 +180,7 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
       maxWaitMs: 21600000              # opt-in wait ceiling; QUOTA never auto-retries
     models:                            # override the discovered/built-in catalogs
       codex:
-        - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
+        - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 400000, inputModalities: [text, image] }
       copilot:                         # manual entries disable Copilot catalog discovery
         - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
 ```

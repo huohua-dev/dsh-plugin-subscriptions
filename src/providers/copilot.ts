@@ -286,8 +286,53 @@ interface CopilotWireModel {
       /** Supported reasoning efforts, present only on models that reason. */
       reasoning_effort?: string[] | null
     }
-    limits?: { max_context_window_tokens?: number }
+    /** Total window, the prompt cap Copilot enforces separately, and the output cap. */
+    limits?: { max_context_window_tokens?: number; max_prompt_tokens?: number; max_output_tokens?: number }
   }
+}
+
+/** A positive safe-integer token count, or undefined. */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * The catalog's token limits. Copilot rejects a prompt above
+ * `max_prompt_tokens` even when it fits `max_context_window_tokens` (e.g. a
+ * 400K window with a 128K prompt cap), so the prompt cap is kept and folded
+ * into the window at resolve time; the output cap bounds `max_tokens`.
+ */
+function copilotLimits(limits: { max_context_window_tokens?: number; max_prompt_tokens?: number; max_output_tokens?: number } | undefined): Pick<DiscoveredModel, 'contextWindow' | 'maxPromptTokens' | 'maxOutputTokens'> {
+  const contextWindow = tokenCount(limits?.max_context_window_tokens)
+  const maxPromptTokens = tokenCount(limits?.max_prompt_tokens)
+  const maxOutputTokens = tokenCount(limits?.max_output_tokens)
+  return {
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...maxPromptTokens === undefined ? {} : { maxPromptTokens },
+    ...maxOutputTokens === undefined ? {} : { maxOutputTokens },
+  }
+}
+
+/** The output cap: configuration may lower the default, never exceed a known server cap. */
+function copilotMaxTokens(configured: ModelEntry | undefined, discovered: DiscoveredModel | undefined): number {
+  const preferred = configured?.maxTokens ?? COPILOT_DEFAULT_MAX_TOKENS
+  return discovered?.maxOutputTokens === undefined ? preferred : Math.min(preferred, discovered.maxOutputTokens)
+}
+
+/**
+ * The host's combined window for one model. The host budgets history as
+ * `contextWindow - maxTokens`, so a prompt cap P becomes `P + maxTokens`
+ * (never above the advertised total), keeping history under what Copilot
+ * accepts.
+ */
+function copilotContextWindow(
+  configured: ModelEntry | undefined,
+  discovered: DiscoveredModel | undefined,
+  maxTokens: number,
+): number {
+  const total = discovered?.contextWindow ?? configured?.contextWindow ?? COPILOT_CONTEXT_WINDOW
+  const prompt = discovered?.maxPromptTokens
+  return prompt === undefined ? total : Math.min(total, prompt + maxTokens)
 }
 
 /** Display name for one Copilot wire reasoning-effort value. */
@@ -365,10 +410,7 @@ export async function fetchCopilotModels(
     discovered.push({
       id: entry.id,
       name: typeof entry.name === 'string' && entry.name.length > 0 ? entry.name : entry.id,
-      ...typeof entry.capabilities?.limits?.max_context_window_tokens === 'number'
-        && entry.capabilities.limits.max_context_window_tokens > 0
-        ? { contextWindow: entry.capabilities.limits.max_context_window_tokens }
-        : {},
+      ...copilotLimits(entry.capabilities?.limits),
       inputModalities: entry.capabilities?.supports?.vision === true ? ['text', 'image'] : ['text'],
       ...reasoning === undefined ? {} : { reasoning },
       ...wire === undefined ? {} : { copilotWire: wire },
@@ -925,14 +967,15 @@ export class CopilotAdapter extends LlmAdapter {
     // A configured default effort still merges in: the picker then
     // preselects it even for models the catalog does not cover.
     const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), discovered?.reasoning)
+    const defaultMaxTokens = copilotMaxTokens(configured, discovered)
     return {
       provider,
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? ['text'],
-      context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? COPILOT_CONTEXT_WINDOW },
-      defaultMaxTokens: configured?.maxTokens ?? COPILOT_DEFAULT_MAX_TOKENS,
+      context: { contextWindow: copilotContextWindow(configured, discovered, defaultMaxTokens) },
+      defaultMaxTokens,
       ...reasoning === undefined ? {} : { reasoning },
     }
   }
@@ -1007,12 +1050,19 @@ export class CopilotAdapter extends LlmAdapter {
   }
 
   private async request(
-    options: GenerateOptions,
+    requested: GenerateOptions,
     session: CopilotSession,
     signal: AbortSignal,
     wire: CopilotWire,
     replayScopeKey: string | undefined,
   ): Promise<Response> {
+    // A caller-chosen cap (compaction, one carried over from another model)
+    // may exceed this model's advertised output ceiling, which Copilot
+    // rejects; the ceiling applies to it like to the default.
+    const outputLimit = requested.maxTokens === undefined ? undefined : (await this.discovered(requested.model))?.maxOutputTokens
+    const options = outputLimit === undefined || requested.maxTokens === undefined || requested.maxTokens <= outputLimit
+      ? requested
+      : { ...requested, maxTokens: outputLimit }
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
     const hasVision = messages.some(message => message.content.some(block => block.type === 'image'))
     const body = wire === 'responses'

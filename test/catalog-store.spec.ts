@@ -33,7 +33,7 @@ test('catalog store round-trips per-provider snapshots in one file', async () =>
       },
     }],
   })
-  await codex.save({ at: 456, models: [{ id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex', maxContextWindow: 872000 }] })
+  await codex.save({ at: 456, models: [{ id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex', maxContextWindow: 872000, maxPromptTokens: 128000 }] })
 
   const loaded = await grok.load()
   assert.equal(loaded?.at, 123)
@@ -41,6 +41,7 @@ test('catalog store round-trips per-provider snapshots in one file', async () =>
   assert.equal(loaded?.models[0].reasoning?.efforts[0].description, 'extensive')
   assert.equal((await codex.load())?.models[0].name, 'GPT-5.2 Codex')
   assert.equal((await codex.load())?.models[0].maxContextWindow, 872000)
+  assert.equal((await codex.load())?.models[0].maxPromptTokens, 128000)
 
   // Clearing one provider keeps the other.
   await grok.clear()

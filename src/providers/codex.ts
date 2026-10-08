@@ -65,8 +65,19 @@ export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
+/** Static fallback in host (combined) units: the GPT-5 family's 272K input + 128K output. */
 const CODEX_CONTEXT_WINDOW = 400_000
+/**
+ * Output reservation. Never sent on the wire (the backend takes no output
+ * cap); it is the host's per-turn completion reserve, and the amount added to
+ * the catalog's input-only windows to express them in combined units.
+ */
 const CODEX_DEFAULT_MAX_TOKENS = 128_000
+
+/** The output reservation for one model: a configured cap, else the family's 128K. */
+function codexDefaultMaxTokens(configured: ModelEntry | undefined): number {
+  return configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS
+}
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
@@ -412,8 +423,11 @@ interface CodexWireModel {
   slug?: string
   display_name?: string
   description?: string | null
+  /** Default INPUT-token limit (excludes the output reservation). */
   context_window?: number | null
+  /** Largest INPUT-token limit the account may opt into. */
   max_context_window?: number | null
+  input_modalities?: string[] | null
   supported_reasoning_levels?: { effort?: string; description?: string }[]
   default_reasoning_level?: string | null
   service_tiers?: { id?: string; name?: string; description?: string }[]
@@ -430,6 +444,17 @@ interface CodexWireModel {
 function supportsFastTier(entry: CodexWireModel): boolean {
   return (entry.service_tiers ?? []).some(tier => tier.id === CODEX_FAST_SERVICE_TIER)
     || (entry.additional_speed_tiers ?? []).includes(CODEX_FAST_SPEED_TIER)
+}
+
+/**
+ * The catalog's `input_modalities`, restricted to what the host models; an
+ * absent, malformed, or text-free list contributes nothing (the adapter then
+ * keeps its text+image default).
+ */
+function codexModalities(value: unknown): { inputModalities?: ('text' | 'image')[] } {
+  if (!Array.isArray(value)) return {}
+  const modalities = (['text', 'image'] as const).filter(modality => value.includes(modality))
+  return modalities.includes('text') ? { inputModalities: [...modalities] } : {}
 }
 
 /**
@@ -494,6 +519,7 @@ export async function fetchCodexModels(
         ? { maxContextWindow: entry.max_context_window! }
         : {},
       ...typeof entry.priority === 'number' ? { priority: entry.priority } : {},
+      ...codexModalities(entry.input_modalities),
       ...efforts.length > 0
         ? { reasoning: { efforts, ...defaultEffort === undefined ? {} : { defaultEffort } } }
         : {},
@@ -756,7 +782,7 @@ export class CodexAdapter extends LlmAdapter {
       id: model.id,
       name: model.name,
       ...model.description === undefined ? {} : { description: model.description },
-      inputModalities: CODEX_MODALITIES,
+      inputModalities: model.inputModalities ?? CODEX_MODALITIES,
       ...model.priority === undefined ? {} : { priority: model.priority },
     } as LlmModelInfo))
   }
@@ -942,19 +968,43 @@ export class CodexAdapter extends LlmAdapter {
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
-      inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
+      inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? CODEX_MODALITIES,
       context: { contextWindow: await this.contextWindowFor(model, account) },
-      defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
+      defaultMaxTokens: codexDefaultMaxTokens(configured),
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
 
-  /** Account-specific bounds; absent maximum conservatively keeps the advertised default. */
-  async contextLimits(model: string, account?: string): Promise<{ default: number; max: number }> {
+  /**
+   * Account-specific context bounds, in the host's combined (request +
+   * response) tokens.
+   *
+   * The `/models` `context_window` / `max_context_window` fields are INPUT
+   * limits: the GPT-5 family's 272K is its 400K window minus the 128K output
+   * reservation, and the 1M tier advertises 872K. The host reserves
+   * `defaultMaxTokens` out of `contextWindow` before it budgets history, so
+   * passing the raw figure through counted the output twice (a 272K entry left
+   * only 144K of history). The reservation is added back here, so the history
+   * budget equals exactly what the backend accepts as input.
+   *
+   * `standard` is the backend's default tier, `max` the largest window the
+   * account may opt into, and `default` the window used when the user sets no
+   * override: the maximum, because the backend accepts it on every request
+   * (Codex itself only gates it behind a config key). An absent maximum
+   * conservatively keeps the standard window. A configured static
+   * `contextWindow` is already in host units and is used verbatim.
+   */
+  async contextLimits(model: string, account?: string): Promise<{ standard: number; default: number; max: number }> {
     const discovered = await this.discovered(model, account)
     const configured = this.options.models.find(entry => entry.id === model)
-    const fallback = discovered?.contextWindow ?? configured?.contextWindow ?? CODEX_CONTEXT_WINDOW
-    return { default: fallback, max: discovered?.maxContextWindow ?? fallback }
+    if (discovered?.contextWindow === undefined) {
+      const fallback = configured?.contextWindow ?? CODEX_CONTEXT_WINDOW
+      return { standard: fallback, default: fallback, max: fallback }
+    }
+    const reserve = codexDefaultMaxTokens(configured)
+    const standard = discovered.contextWindow + reserve
+    const max = Math.max(standard, (discovered.maxContextWindow ?? discovered.contextWindow) + reserve)
+    return { standard, default: max, max }
   }
 
   private async contextWindowFor(model: string, account?: string): Promise<number> {

@@ -145,7 +145,7 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
   const modelsPayload = {
     models: {
       'gemini-3-flash': {
-        displayName: 'Gemini 3 Flash', inputTokenLimit: 500_000,
+        displayName: 'Gemini 3 Flash', inputTokenLimit: 500_000, supportsImages: true,
         quotaInfo: { remainingFraction: 0.7, resetTime: '2026-08-24T00:00:00Z' },
         weeklyQuotaInfo: { remainingFraction: 0.4, resetTime: '2026-08-30T00:00:00Z' },
       },
@@ -345,6 +345,40 @@ test('Antigravity discovery retains valid output caps without confusing maxToken
   for (const model of models.slice(2)) assert.equal(Object.hasOwn(model, 'maxOutputTokens'), false)
 })
 
+test('Antigravity reads per-model windows and vision from the live catalog shape and drops non-agent models', async () => {
+  // Shape of a live fetchAvailableModels response (2026-10): the window is
+  // `maxTokens`, vision is `supportsImages`, and editor-only models ride along.
+  const fetchFn = routed({
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: {
+      models: {
+        'gemini-3.1-pro-low': { displayName: 'Gemini 3.1 Pro (Low)', supportsImages: true, maxTokens: 1_048_576, maxOutputTokens: 65_535 },
+        'claude-sonnet-4-6': { displayName: 'Claude Sonnet 4.6 (Thinking)', supportsImages: true, maxTokens: 250_000, maxOutputTokens: 64_000 },
+        'gpt-oss-120b-medium': { displayName: 'GPT-OSS 120B (Medium)', maxTokens: 131_072, maxOutputTokens: 32_768 },
+        'gemini-no-window': { displayName: 'No Window', supportsImages: true },
+        'chat_20706': { maxTokens: 16_384, isInternal: true },
+        'chat_99999': { maxTokens: 16_384 },
+        'tab_flash_lite_preview': { maxTokens: 16_384, maxOutputTokens: 4_096 },
+        'gemini-3.1-flash-image': { displayName: 'Gemini 3.1 Flash Image' },
+      },
+      tabModelIds: ['chat_20706', 'chat_99999'],
+      imageGenerationModelIds: ['gemini-3.1-flash-image'],
+    },
+  })
+  const models = await fetchAntigravityModels(session, runtime, fetchFn)
+  assert.deepEqual(models.map(model => [model.id, model.contextWindow, model.inputModalities]), [
+    ['gemini-3.1-pro-low', 1_048_576, ['text', 'image']],
+    ['claude-sonnet-4-6', 250_000, ['text', 'image']],
+    ['gpt-oss-120b-medium', 131_072, ['text']],
+    ['gemini-no-window', 1_048_576, ['text', 'image']],
+  ])
+  const { tokens } = accountTokens()
+  const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime, fetchFn })
+  const claude = await adapter.resolveOwnModel('antigravity', 'claude-sonnet-4-6', 'alice')
+  assert.equal(claude.context?.contextWindow, 250_000)
+  assert.equal(claude.defaultMaxTokens, 64_000)
+  assert.deepEqual((await adapter.resolveOwnModel('antigravity', 'gpt-oss-120b-medium', 'alice')).inputModalities, ['text'])
+})
+
 test('Antigravity resolves per-model output defaults and bounds configured defaults to the catalog', async () => {
   const { tokens } = accountTokens()
   const limits: Record<string, number> = {
@@ -352,7 +386,7 @@ test('Antigravity resolves per-model output defaults and bounds configured defau
     'gpt-oss-120b-medium': 32768,
     'claude-sonnet-4-6': 64000,
     'gemini-3-flash': 65536,
-    'tab_flash_lite_preview': 4096,
+    'gemini-3.5-flash-lite': 4096,
   }
   let fetches = 0
   const fetchFn: FetchFn = async () => {

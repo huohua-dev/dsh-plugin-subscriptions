@@ -45,7 +45,7 @@ test('Codex projects current harness tool messages into correlated Responses out
   ])
 })
 
-test('Codex context overrides clamp per account, restore defaults, and distrust missing maxima', async () => {
+test('Codex context overrides clamp per account, default to the maximum, and distrust missing maxima', async () => {
   let requested: number | undefined = 512_000
   const sessions = {
     pro: { accessToken: 'pro', refreshToken: 'r', accountId: 'pro', expiresAt: Date.now() + 3600000 },
@@ -59,13 +59,34 @@ test('Codex context overrides clamp per account, restore defaults, and distrust 
       { slug: 'unknown-max', context_window: 272000 },
     ] }))) as FetchFn,
   })
-  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 512000)
-  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'plus')).context?.contextWindow, 300000)
-  assert.equal((await adapter.resolveOwnModel('codex', 'unknown-max', 'pro')).context?.contextWindow, 272000)
+  // The catalog's windows are input limits; the host's are combined, so the
+  // 128K output reservation is added back (272K -> 400K, 872K -> 1M).
+  assert.deepEqual(await adapter.contextLimits('m', 'pro'), { standard: 400_000, default: 1_000_000, max: 1_000_000 })
+  assert.deepEqual(await adapter.contextLimits('unknown-max', 'pro'), { standard: 400_000, default: 400_000, max: 400_000 })
+  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 512_000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'plus')).context?.contextWindow, 428_000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'unknown-max', 'pro')).context?.contextWindow, 400_000)
   requested = undefined
-  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 272000)
+  const pro = await adapter.resolveOwnModel('codex', 'm', 'pro')
+  assert.equal(pro.context?.contextWindow, 1_000_000, 'a blank override uses the account maximum')
+  // The host budgets history as contextWindow - defaultMaxTokens: exactly the advertised input limit.
+  assert.equal(pro.context!.contextWindow - pro.defaultMaxTokens!, 872_000)
   requested = 128000
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 128000)
+})
+
+test('Codex keeps a configured static context window verbatim and reads catalog input modalities', async () => {
+  const adapter = new CodexAdapter({
+    models: [{ id: 'static', contextWindow: 300_000, maxTokens: 64_000 }], discovery: true,
+    tokens: memoryAccounts({ a: { accessToken: 'a', refreshToken: 'r', accountId: 'a', expiresAt: Date.now() + 3600000 } }), streamIdleTimeoutMs: 1000,
+    fetchFn: (async () => new Response(JSON.stringify({ models: [
+      { slug: 'text-only', context_window: 272000, max_context_window: 872000, input_modalities: ['text'] },
+      { slug: 'reserve', context_window: 272000, max_context_window: 872000 },
+    ] }))) as FetchFn,
+  })
+  assert.deepEqual((await adapter.resolveOwnModel('codex', 'text-only', 'a')).inputModalities, ['text'])
+  assert.deepEqual((await adapter.resolveOwnModel('codex', 'reserve', 'a')).inputModalities, ['text', 'image'])
+  assert.deepEqual(await adapter.contextLimits('static', 'a'), { standard: 300_000, default: 300_000, max: 300_000 })
 })
 
 const codexSession: CodexSession = {
@@ -299,7 +320,7 @@ test('resolveModel prefers discovered context window and reasoning efforts', asy
   const adapter = codexAdapter({ session: codexSession, fetchFn })
   await adapter.listModels('codex')
   const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
-  assert.equal(resolved.context?.contextWindow, 500_000)
+  assert.equal(resolved.context?.contextWindow, 628_000, 'the input-only catalog window plus the 128K output reservation')
   assert.deepEqual(
     resolved.reasoning?.efforts.map(effort => effort.id),
     ['low', 'high'],
@@ -1185,7 +1206,7 @@ test('codex resolveModel on a cold cache fetches the catalog itself', async () =
   const adapter = codexAdapter({ session: codexSession, fetchFn })
   const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
-  assert.equal(resolved.context?.contextWindow, 500_000)
+  assert.equal(resolved.context?.contextWindow, 628_000, 'the input-only catalog window plus the 128K output reservation')
 })
 
 const STATIC_COPILOT = [{
@@ -1273,6 +1294,30 @@ test('copilot listModels maps the discovered catalog and filters unusable entrie
   assert.deepEqual(models[1].inputModalities, ['text'])
   assert.deepEqual(models[2].inputModalities, ['text', 'image'])
   assert.equal(models[0].name, 'GPT-4.1')
+})
+
+test('copilot folds the enforced prompt cap and output cap into the resolved limits', async () => {
+  const entry = (id: string, limits: Record<string, number>) => ({
+    id, name: id, model_picker_enabled: true, policy: { state: 'enabled' },
+    supported_endpoints: ['/chat/completions'], capabilities: { supports: {}, limits },
+  })
+  const { fetchFn } = fakeFetch({ data: [
+    // A 400K total window whose prompt is capped at 128K: history must stay under the cap.
+    entry('capped', { max_context_window_tokens: 400_000, max_prompt_tokens: 128_000, max_output_tokens: 8_000 }),
+    entry('roomy', { max_context_window_tokens: 128_000, max_prompt_tokens: 128_000, max_output_tokens: 64_000 }),
+    entry('plain', { max_context_window_tokens: 200_000 }),
+  ] })
+  const adapter = copilotAdapter({ session: copilotSession, fetchFn })
+  await adapter.listModels('copilot')
+  const capped = await adapter.resolveModel('copilot', 'capped')
+  assert.equal(capped.defaultMaxTokens, 8_000, 'the default output cap never exceeds the advertised one')
+  assert.equal(capped.context?.contextWindow, 136_000)
+  assert.equal(capped.context!.contextWindow - capped.defaultMaxTokens!, 128_000)
+  const roomy = await adapter.resolveModel('copilot', 'roomy')
+  assert.equal(roomy.defaultMaxTokens, 16_000)
+  assert.equal(roomy.context?.contextWindow, 128_000, 'the total window still bounds the sum')
+  const plain = await adapter.resolveModel('copilot', 'plain')
+  assert.equal(plain.context?.contextWindow, 200_000)
 })
 
 test('copilot discovery records the wire protocol per model', async () => {

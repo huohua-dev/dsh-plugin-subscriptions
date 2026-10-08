@@ -59,7 +59,8 @@ export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
 export const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-subscriptions'
 export const ANTIGRAVITY_PREEMPT_MS = 5 * 60_000
 const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback'
-const ANTIGRAVITY_CONTEXT_WINDOW = 1_024_000
+// Fallback only when the catalog omits a window: Gemini's 1,048,576-token limit.
+const ANTIGRAVITY_CONTEXT_WINDOW = 1_048_576
 // Fallback only when discovery is unavailable or the model omits its output cap.
 const ANTIGRAVITY_DEFAULT_MAX_TOKENS = 32_768
 
@@ -360,9 +361,15 @@ export function isAntigravityPermanentRefreshError(error: unknown): boolean {
 interface AntigravityWireModel {
   displayName?: string
   description?: string
+  /** The model's context window (the field fetchAvailableModels actually returns). */
+  maxTokens?: number
+  /** Gemini API spellings, read only when `maxTokens` is absent. */
   inputTokenLimit?: number
   maxInputTokens?: number
   maxOutputTokens?: number
+  supportsImages?: boolean
+  /** Editor-internal models (tab completion, inline chat) with no agent surface. */
+  isInternal?: boolean
   quotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuota?: { remainingFraction?: number; resetTime?: string }
@@ -370,6 +377,27 @@ interface AntigravityWireModel {
 
 interface AntigravityModelsResponse {
   models?: Record<string, AntigravityWireModel>
+  /** Tab-completion model ids. */
+  tabModelIds?: string[]
+  /** Image-generation model ids (not chat models). */
+  imageGenerationModelIds?: string[]
+}
+
+/** A positive safe-integer token count, or undefined. */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * Whether a catalog entry can serve an agent turn. The catalog also lists the
+ * editor's tab-completion and inline models (16K-32K windows, flagged
+ * `isInternal` or named in `tabModelIds`, `tab_*` ids) and the image
+ * generator; offering them in the picker only produces failing sessions.
+ */
+function isAgentModel(id: string, model: AntigravityWireModel, payload: AntigravityModelsResponse): boolean {
+  if (model.isInternal === true || id.startsWith('tab_')) return false
+  if (payload.tabModelIds?.includes(id) === true) return false
+  return payload.imageGenerationModelIds?.includes(id) !== true
 }
 
 /** Fetch the authenticated account's live Antigravity model catalog. */
@@ -390,15 +418,24 @@ export async function fetchAntigravityModels(
   if (typeof payload.models !== 'object' || payload.models === null) {
     throw new Error('Antigravity models endpoint returned no models object')
   }
-  const models = Object.entries(payload.models).map(([id, model]): DiscoveredModel => ({
-    id,
-    name: model.displayName ?? id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' '),
-    ...model.description === undefined ? {} : { description: model.description },
-    contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
-    ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0
-      ? { maxOutputTokens: model.maxOutputTokens } : {},
-    inputModalities: ['text', 'image'],
-  }))
+  const models = Object.entries(payload.models)
+    .filter(([id, model]) => isAgentModel(id, model, payload))
+    .map(([id, model]): DiscoveredModel => {
+      const maxOutputTokens = tokenCount(model.maxOutputTokens)
+      return {
+        id,
+        name: model.displayName ?? id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' '),
+        ...model.description === undefined ? {} : { description: model.description },
+        // Per-model windows differ widely (Gemini 1,048,576, Claude 250,000,
+        // GPT-OSS 131,072); a single constant overflowed the smaller ones.
+        contextWindow: tokenCount(model.maxTokens) ?? tokenCount(model.inputTokenLimit)
+          ?? tokenCount(model.maxInputTokens) ?? ANTIGRAVITY_CONTEXT_WINDOW,
+        ...maxOutputTokens === undefined ? {} : { maxOutputTokens },
+        // The catalog flags vision support; entries without it (GPT-OSS)
+        // reject image parts.
+        inputModalities: model.supportsImages === true ? ['text', 'image'] : ['text'],
+      }
+    })
   if (models.length === 0) throw new Error('Antigravity models endpoint returned an empty catalog')
   return models
 }

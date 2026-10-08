@@ -11,6 +11,7 @@ interface ModelRow {
   name: string
   contextWindow?: number
   defaultContextWindow?: number
+  standardContextWindow?: number
   efforts?: { id: string; name: string }[]
   configured?: string
   maxContextWindow?: number
@@ -175,7 +176,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
                   aria-label={`${model.name} ${t('modelsContext')}`} placeholder={String(model.defaultContextWindow)}
                   onChange={event => { setContexts({ ...contexts, [model.id]: event.target.value }); setDirty(true) }} />
               </label>
-              <small>{t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow })}</small>
+              <small>{t('modelsContextBounds', { standard: model.standardContextWindow ?? model.defaultContextWindow, max: model.maxContextWindow })}</small>
             </div>}
             </div>
           </div>)}

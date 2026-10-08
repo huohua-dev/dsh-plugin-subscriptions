@@ -258,7 +258,7 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
   ],
   grok: [
     { id: 'grok-4', name: 'Grok 4' },
-    { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning' },
+    { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning', contextWindow: 2_000_000 },
     { id: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
   ],
   // Static fallback only: the live /models catalog (with per-model vision
@@ -271,10 +271,11 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
   ],
   // Static fallback only; the authenticated fetchAvailableModels response wins.
   antigravity: [
-    { id: 'gemini-3-flash', name: 'Gemini 3 Flash', inputModalities: ['text', 'image'] },
-    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro High', inputModalities: ['text', 'image'] },
-    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
-    { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', inputModalities: ['text', 'image'] },
+    // Limits mirror the live catalog (fetchAvailableModels `maxTokens`).
+    { id: 'gemini-3-flash', name: 'Gemini 3 Flash', contextWindow: 1_048_576, maxTokens: 65_536, inputModalities: ['text', 'image'] },
+    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro High', contextWindow: 1_048_576, maxTokens: 65_535, inputModalities: ['text', 'image'] },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 250_000, maxTokens: 64_000, inputModalities: ['text', 'image'] },
+    { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', contextWindow: 250_000, maxTokens: 64_000, inputModalities: ['text', 'image'] },
   ],
 }
 
@@ -1192,7 +1193,7 @@ export function apply(ctx: Context, config: Config): void {
       })))
       const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
       const rows = await Promise.all(models.map(async model => {
-        const contexts: { default: number; max: number }[] = []
+        const contexts: { standard: number; default: number; max: number }[] = []
         if (provider === 'codex' && codexAdapter) {
           for (const account of accountCatalogs) {
             if (account.models?.some(entry => entry.id === model.id)) {
@@ -1209,6 +1210,7 @@ export function apply(ctx: Context, config: Config): void {
           efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
           configured: defaultEffortOf(provider, model.id),
           ...(contexts.length ? {
+            standardContextWindow: Math.min(...contexts.map(entry => entry.standard)),
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
           } : {}),

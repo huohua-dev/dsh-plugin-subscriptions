@@ -1,13 +1,19 @@
 /**
  * Rate-limit window handling: the shared value/duration/date parsing, each
  * provider's reset reader against its own 429 shapes, the classification of a
- * 429 as RATE_LIMIT ahead of the quota-wording check, and the retry policy
+ * 429 as terminal QUOTA or transient RATE_LIMIT, and the retry policy
  * whose delay ceiling decides how long a route may hold a turn open.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { httpLlmError } from '../src/providers/common.js'
+import { anthropicFailure } from '../src/translate/anthropic.js'
+import { LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { Context } from '@deepseek-ai/cordis'
+import { PoolAdapter } from '../src/providers/pool.js'
+import { PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import {
   DEFAULT_RATE_LIMIT_MAX_WAIT_MS,
@@ -207,14 +213,91 @@ test('grok: a body-named retry delay serves when no header carries one', () => {
   assert.equal(grokRateLimitReset(failure(429, {}), '{"error":"rate limited"}', NOW), undefined)
 })
 
-test('a 429 classifies as RATE_LIMIT even when the wording reads as terminal quota', async () => {
+test('explicit subscription exhaustion stays terminal QUOTA even on HTTP 429', async () => {
   const body = '{"detail":{"type":"usage_limit_reached","resets_in_seconds":9000,"plan_type":"plus"}}'
   const error = await httpLlmError(failure(429, {}, body), 'codex API', {
     rateLimitReset: codexRateLimitReset,
   })
-  assert.equal(error.code, 'RATE_LIMIT')
+  assert.equal(error.code, 'QUOTA')
+  assert.match(error.message, /subscription quota exhausted/)
   assert.ok(error.failure.providerRetryAfterMs !== undefined)
   assert.ok(error.failure.providerRetryAfterMs > 8_990_000)
+})
+
+test('Claude exhausted subscription reaches runtime as non-retryable QUOTA on first and cached calls', async () => {
+  let calls = 0
+  const claude = new ClaudeAdapter({
+    models: [{ id: 'claude-opus-5' }], discovery: false, streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    fetchFn: async () => {
+      calls++
+      return failure(429, {
+        'retry-after': '60',
+        'anthropic-ratelimit-unified-status': 'rejected',
+        'anthropic-ratelimit-unified-reset': String(Math.floor(Date.now() / 1000) + 10438),
+      }, JSON.stringify({ error: { type: 'rate_limit_error', message: "You've hit your limit" } }))
+    },
+  })
+  const pool = new PoolAdapter({
+    adapters: { claude }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined),
+    strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'acct', tiers: {}, onWarn: () => {},
+    families: async () => new Map([['claude/claude-opus-5', { members: [{ provider: 'claude', account: 'acct', model: 'claude-opus-5' }] }]]),
+  })
+  const runtime = new LlmRuntime(new Context())
+  const dispose = runtime.registerAdapter(['claude'], pool)
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let seen = false
+      for await (const chunk of runtime.stream({ provider: 'claude', model: 'claude-opus-5', messages: [] })) {
+        if (chunk.type !== 'finish' || chunk.reason.kind !== 'error') continue
+        seen = true
+        assert.equal(chunk.reason.failure.code, 'QUOTA')
+        assert.match(chunk.reason.failure.message, /subscription quota exhausted/)
+        assert.match(chunk.reason.failure.message, /Quota resets at/)
+        const policy = claude.providerRetryPolicy('claude')!
+        assert.equal(policy.mode === 'normal' && policy.retryableCodes.includes(chunk.reason.failure.code), false)
+      }
+      assert.ok(seen)
+    }
+    assert.equal(calls, 1, 'cached quota must not send another request')
+  } finally { dispose() }
+})
+
+test('Claude SSE distinguishes subscription exhaustion from burst throttling', () => {
+  assert.equal(anthropicFailure({ type: 'rate_limit_error', message: "You've hit your limit · resets 3pm" }).code, 'QUOTA')
+  assert.equal(anthropicFailure({ type: 'rate_limit_error', message: 'Weekly usage limit exceeded' }).code, 'QUOTA')
+  assert.equal(anthropicFailure({ type: 'rate_limit_error', message: 'Too many requests per minute' }).code, 'RATE_LIMIT')
+  assert.equal(anthropicFailure({ type: 'rate_limit_error', message: 'You have reached the limit of requests per minute' }).code, 'RATE_LIMIT')
+})
+
+test('RPM/TPM quota wording stays transient for both HTTP and SSE', async () => {
+  for (const message of [
+    'You have reached the limit of 60 requests per minute',
+    'You have exceeded your limit of 1000 input tokens per minute',
+    'Quota exceeded for quota metric Requests and limit Requests per minute',
+  ]) {
+    assert.equal((await httpLlmError(failure(429, {}, message), 'API')).code, 'RATE_LIMIT')
+    assert.equal(anthropicFailure({ type: 'rate_limit_error', message }).code, 'RATE_LIMIT')
+  }
+})
+
+test('allowed or malformed unified reset headers do not imply exhausted quota', async () => {
+  for (const status of ['allowed', 'allowed_warning', undefined]) {
+    for (const reset of ['garbage', String(Math.floor(Date.now() / 1000) + 10000)]) {
+      if (status === undefined && reset !== 'garbage') continue // legacy rejected-window header
+      const error = await httpLlmError(failure(429, {
+        ...status === undefined ? {} : { 'anthropic-ratelimit-unified-status': status },
+        'anthropic-ratelimit-unified-reset': reset, 'retry-after': '1',
+      }, 'Too many requests per minute'), 'claude API', { rateLimitReset: claudeRateLimitReset })
+      assert.equal(error.code, 'RATE_LIMIT')
+      assert.ok((error.failure.providerRetryAfterMs ?? 0) <= 3000)
+    }
+  }
+})
+
+test('quota detection reads beyond the display truncation', async () => {
+  const error = await httpLlmError(failure(429, {}, JSON.stringify({ note: 'x'.repeat(1000), error: { type: 'usage_limit_reached' } })), 'codex API')
+  assert.equal(error.code, 'QUOTA')
 })
 
 test('quota wording still classifies as QUOTA on any other status', async () => {
@@ -337,7 +420,7 @@ test('an Antigravity quota body discloses its reset without a provider reader', 
   const error = await httpLlmError(failure(429, {}, body), 'Antigravity API', {
     onWarn: message => warnings.push(message),
   })
-  assert.equal(error.code, 'RATE_LIMIT')
+  assert.equal(error.code, 'QUOTA')
   assert.equal(warnings.length, 0)
   const wait = error.failure.providerRetryAfterMs
   assert.ok(wait !== undefined)
@@ -457,9 +540,9 @@ test('the shared retry shape is Claude Code\'s, not the dsh-llm default', () => 
   })
 })
 
-test('rate-limit waiting defaults to on with a six-hour ceiling', () => {
+test('long rate-limit waiting is opt-in, with a configurable six-hour ceiling', () => {
   assert.deepEqual(resolveRateLimitWait(undefined, 'config: rateLimit'), {
-    wait: true,
+    wait: false,
     maxWaitMs: DEFAULT_RATE_LIMIT_MAX_WAIT_MS,
   })
   assert.deepEqual(resolveRateLimitWait({ wait: false }, 'config: rateLimit'), {

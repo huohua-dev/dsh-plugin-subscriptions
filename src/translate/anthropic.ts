@@ -13,6 +13,7 @@ import {
   QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
+import { isSubscriptionQuotaExceeded } from '../providers/quota.js'
 import type {
   ContentBlock,
   ReplayEnvelope,
@@ -567,7 +568,9 @@ export function anthropicFailure(error: { type?: string; message?: string } | un
     case 'request_too_large':
       return new LlmError(message, 'INVALID_REQUEST')
     case 'rate_limit_error':
-      return new LlmError(message, 'RATE_LIMIT')
+      return isSubscriptionQuotaExceeded(message)
+        ? new LlmError(`Subscription quota exhausted: ${message}`, QUOTA_EXCEEDED_CODE)
+        : new LlmError(message, 'RATE_LIMIT')
     case 'authentication_error':
     case 'permission_error':
       return new LlmError(message, 'AUTH')

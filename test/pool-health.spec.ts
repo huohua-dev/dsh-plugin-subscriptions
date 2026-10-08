@@ -75,14 +75,9 @@ test('classifyPoolFailure: auth failures park the account until re-login', () =>
   }
 })
 
-test('classifyPoolFailure: transient server failures cool the member briefly', () => {
+test('classifyPoolFailure: transient failures do not poison shared account health', () => {
   for (const code of ['SERVER', 'TIMEOUT', 'EMPTY_RESPONSE']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), {
-      action: 'switch',
-      cooldownMs: TRANSIENT_COOLDOWN_MS,
-      reason: code,
-      scope: 'member',
-    })
+    assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), { action: 'switch' })
   }
 })
 

@@ -14,7 +14,7 @@ import { PoolAdapter } from '../src/providers/pool.js'
 import { unionAccountCatalogs } from '../src/providers/accounts.js'
 import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
-import { memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
@@ -681,6 +681,72 @@ test('stream: an exhausted pool throws RATE_LIMIT with the earliest recovery hin
       return true
     },
   )
+})
+
+for (const code of ['EMPTY_RESPONSE', 'SERVER', 'TIMEOUT', 'TRANSPORT']) {
+  test(`stream: ${code} during review does not poison foreground health`, async () => {
+    let reviewing = true
+    const codex = new FakeAdapter(async function* () {
+      if (reviewing) {
+        yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 0 } }
+        yield { type: 'finish', reason: { kind: 'error', failure: { code, message: `review failed: ${code}` } } }
+      } else yield* serveOk()
+    })
+    const { pool, health } = makePool({ codex })
+    await assert.rejects(collect(pool.stream({ ...OPTIONS, sessionId: SessionId('review') })), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, code)
+      assert.match(error.message, /review failed/)
+      assert.equal(error.failure.providerRetryAfterMs, undefined)
+      return true
+    })
+    assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), true)
+    assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
+    reviewing = false
+    assert.ok((await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('foreground') }))).length > 0)
+    assert.equal(codex.calls, 3)
+  })
+}
+
+for (const code of ['QUOTA', 'AUTH', 'INVALID_CREDENTIAL']) {
+  test(`stream: ${code} survives exhaustion and a health-only subsequent call`, async () => {
+    const codex = new FakeAdapter(() => serveFail(new LlmError(`actual ${code} reason`, code, { providerRetryAfterMs: 10_438_824 })))
+    const { pool } = makePool({ codex })
+    for (let call = 0; call < 2; call++) {
+      await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+        assert.ok(error instanceof LlmError)
+        assert.equal(error.code, code)
+        assert.match(error.message, new RegExp(`actual ${code} reason`))
+        if (code === 'QUOTA') assert.match(error.message, /subscription quota exhausted/)
+        return true
+      })
+    }
+    assert.equal(codex.calls, 2, 'cooling accounts are not retried')
+  })
+}
+
+test('stream: a transient candidate remains retryable when another account has no quota', async () => {
+  const codex = new FakeAdapter((_options, account) => serveFail(new LlmError(account, account === 'a1' ? 'TRANSPORT' : 'QUOTA')))
+  const { pool } = makePool({ codex })
+  for (let call = 0; call < 2; call++) {
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => error instanceof LlmError && error.code === 'TRANSPORT')
+  }
+  assert.deepEqual(codex.accounts, ['a1', 'a2', 'a1'])
+})
+
+test('stream: recovery requires both member and account cooldowns to expire', async () => {
+  const { pool, health } = makePool({ codex: new FakeAdapter(() => serveOk()) })
+  health.markUnavailable(accountKey('codex', 'a1'), 90_000, 'RATE_LIMIT')
+  health.markUnavailable(memberKey('codex', 'a1', 'm'), 10_000, 'RATE_LIMIT')
+  health.markUnavailable(accountKey('codex', 'a2'), 60_000, 'RATE_LIMIT')
+  health.markUnavailable(accountKey('grok', 'unrelated'), 1_000, 'RATE_LIMIT')
+  await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'RATE_LIMIT')
+    assert.ok((error.failure.providerRetryAfterMs ?? 0) > 55_000)
+    assert.ok((error.failure.providerRetryAfterMs ?? Infinity) <= 60_000)
+    return true
+  })
 })
 
 test('resolveModel uses the pool display name', async () => {

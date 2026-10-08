@@ -108,10 +108,11 @@ const CLAUDE_RESET_FIELDS = ['resets_at', 'resetsAt', 'reset_at', 'retry_after']
  * `rateLimitDiagnostics` instead.
  */
 export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) => {
-  const unified = earliestReset(
+  const status = response.headers.get('anthropic-ratelimit-unified-status')
+  const unified = status === null || status === 'rejected' ? earliestReset(
     resetInstantFromHeader(response, 'anthropic-ratelimit-unified-reset', now),
     resetInstantFromHeader(response, 'anthropic-ratelimit-unified-fallback-reset', now),
-  )
+  ) : undefined
   if (unified !== undefined) return unified
   return resetFromFields(jsonBody(body), CLAUDE_RESET_FIELDS, now)
 }

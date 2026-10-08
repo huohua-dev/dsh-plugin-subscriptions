@@ -10,13 +10,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   isContextWindowExceededError,
-  isQuotaExceededError,
   LlmError,
   QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import { durationMs, rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
+import { durationMs, earliestReset, rateLimitDiagnostics, resetInstantFromHeader, retryAfterInstant, waitFromReset } from './rate-limit.js'
 import type { RateLimitResetReader } from './rate-limit.js'
+import { isSubscriptionQuotaExceeded } from './quota.js'
 
 /** One configured model catalog entry. */
 export interface ModelEntry {
@@ -97,11 +97,9 @@ export interface HttpLlmErrorOptions {
  * stable code and, for a rate-limited request, the disclosed reset instant to
  * the `providerRetryAfterMs` the retry plugin waits out.
  *
- * A 429 classifies as `RATE_LIMIT` on the strength of the status alone, ahead
- * of the quota-wording check. On these routes there is no terminal quota to
- * distinguish: a subscription has no balance to top up, only a window that
- * reopens, and providers announce an exhausted window with wording
- * (`usage_limit_reached`) the shared classifier reads as permanent.
+ * Explicit subscription exhaustion stays QUOTA even on HTTP 429: a future
+ * reset is a pool cooldown hint, not permission to hold the current turn open.
+ * Ordinary burst throttling remains RATE_LIMIT.
  * @param response - the failed response.
  * @param label - diagnostic prefix naming the provider API.
  * @param options - the calling provider's rate-limit reader and warning sink.
@@ -125,8 +123,9 @@ export async function httpLlmError(
     : `${label} error (HTTP ${String(response.status)})`
   let code: string
   if (response.status === 401 || response.status === 403) code = 'AUTH'
+  else if (isSubscriptionQuotaExceeded(body)
+    || (response.status === 429 && response.headers.get('anthropic-ratelimit-unified-status') === 'rejected')) code = QUOTA_EXCEEDED_CODE
   else if (response.status === 429) code = 'RATE_LIMIT'
-  else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
   else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE
   else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
   else if (response.status >= 500) code = 'SERVER'
@@ -148,10 +147,21 @@ export async function httpLlmError(
   const reset = rateLimited
     ? options.rateLimitReset?.(response, body, now) ?? googleQuotaReset(body, now) ?? retryAfterInstant(response, now)
     : retryAfterInstant(response, now)
+  // Claude's unified reset identifies a rejected subscription window, unlike
+  // the per-request/token snapshot headers sent even on healthy responses.
+  const unifiedStatus = response.headers.get('anthropic-ratelimit-unified-status')
+  const unifiedReset = earliestReset(
+    resetInstantFromHeader(response, 'anthropic-ratelimit-unified-reset', now),
+    resetInstantFromHeader(response, 'anthropic-ratelimit-unified-fallback-reset', now),
+  )
+  if (rateLimited && unifiedStatus === null && unifiedReset !== undefined) code = QUOTA_EXCEEDED_CODE
   if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
-  return new LlmError(message, code, {
+  const detail = code === QUOTA_EXCEEDED_CODE
+    ? `${label}: subscription quota exhausted; this turn cannot continue on this account.${reset === undefined ? '' : ` Quota resets at ${new Date(reset).toISOString()}.`} ${message}`
+    : message
+  return new LlmError(detail, code, {
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
   })

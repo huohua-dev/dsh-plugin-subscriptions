@@ -261,7 +261,7 @@ export class PoolAdapter extends LlmAdapter {
   private async *streamMembers(options: GenerateOptions, members: ConcretePoolMember[]): AsyncIterable<StreamChunk> {
     const candidates = await withAbortSignal(() => this.select(options.model, members, options.sessionId), options.signal)
     if (candidates.length === 0) throw this.exhausted(options.model, members)
-    let lastError: unknown
+    const failures = new Map<ConcretePoolMember, LlmError>()
     for (const member of candidates) {
       options.signal?.throwIfAborted()
       const adapter = this.options.adapters[member.provider]
@@ -298,6 +298,8 @@ export class PoolAdapter extends LlmAdapter {
               : memberKey(member.provider, member.account, member.model),
             classification.cooldownMs,
             classification.reason,
+            Date.now(),
+            error instanceof LlmError ? error : undefined,
           )
           // A quota failure invalidates the cached usage snapshot so the NEXT
           // selection re-polls instead of trusting minutes-old percentages.
@@ -310,7 +312,7 @@ export class PoolAdapter extends LlmAdapter {
           `pool "${options.model}": ${memberLabel(member)} failed before any output`
           + ` (${error instanceof Error ? error.message : String(error)}); trying the next member`,
         )
-        lastError = error
+        if (error instanceof LlmError) failures.set(member, error)
         continue
       }
       this.remember(options.model, options.sessionId, member)
@@ -335,7 +337,7 @@ export class PoolAdapter extends LlmAdapter {
       }
       return
     }
-    throw this.exhausted(options.model, members, lastError)
+    throw this.exhausted(options.model, members, failures)
   }
 
   /**
@@ -395,27 +397,33 @@ export class PoolAdapter extends LlmAdapter {
     this.sticky.set(key, memberKey(member.provider, member.account, member.model))
   }
 
-  /**
-   * The error for an exhausted pool, carrying the earliest recovery hint of
-   * THIS pool's members (the health registry is shared across pools, so the
-   * hint is scoped to the keys this pool can actually recover through).
-   */
-  private exhausted(model: string, pool: ConcretePoolMember[], cause?: unknown): LlmError {
-    const keys = new Set<string>()
-    for (const member of pool) {
-      keys.add(memberKey(member.provider, member.account, member.model))
-      keys.add(accountKey(member.provider, member.account))
-    }
-    const recovery = this.options.health.earliestRecovery(keys)
-    const retryAfterMs = recovery === undefined ? undefined : Math.max(recovery - Date.now(), 1)
-    return new LlmError(
-      `pool "${model}" exhausted: every member is unavailable or failed`,
-      'RATE_LIMIT',
-      {
-        ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
-        ...cause === undefined ? {} : { cause },
-      },
-    )
+  /** Preserve real failures, including when every member was skipped by health. */
+  private exhausted(model: string, pool: ConcretePoolMember[], failures = new Map<ConcretePoolMember, LlmError>()): LlmError {
+    const now = Date.now()
+    const reasons = pool.flatMap(member => {
+      const blocker = this.options.health.memberBlocker(member.provider, member.account, member.model, now)
+      const failure = blocker?.failure ?? failures.get(member)
+        ?? (blocker === undefined ? undefined : new LlmError(`account unavailable (${blocker.reason})`, blocker.reason))
+      return failure === undefined ? [] : [{ failure, retryAfterMs: blocker === undefined
+        ? failure.failure.providerRetryAfterMs : Math.max(1, blocker.unavailableUntil - now) }]
+    })
+    // A transiently failed member can recover without quota/auth intervention.
+    // Do not let a different account's terminal quota hide that retry path.
+    const retryable = reasons.filter(({ failure }) => ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', EMPTY_RESPONSE_CODE].includes(failure.code))
+    const choices = retryable.length > 0 ? retryable : reasons
+    choices.sort((a, b) => (a.retryAfterMs ?? 0) - (b.retryAfterMs ?? 0))
+    const selected = choices[0]
+    if (selected === undefined) return new LlmError(`pool "${model}": no logged-in account is available`, 'MISSING_CREDENTIAL')
+    const { failure, retryAfterMs } = selected
+    const allQuota = reasons.length === pool.length && reasons.every(item => item.failure.code === QUOTA_EXCEEDED_CODE)
+    const summary = allQuota
+      ? 'subscription quota exhausted for all available accounts; task stopped until quota resets or another account is added'
+      : 'no account could complete this request'
+    return new LlmError(`pool "${model}": ${summary}. ${failure.message}`, failure.code, {
+      ...failure.failure,
+      ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+      cause: failure,
+    })
   }
 }
 

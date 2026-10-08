@@ -60,8 +60,8 @@ function retryAfterMs(error: LlmError): number | undefined {
  * the provider's own `retry-after` when sent, which is more accurate than
  * any fixed guess) — account-wide for account-metered providers, per-member
  * for model-scoped ones; auth failures park the account until re-login
- * (credentials are account-level); server/timeout failures get a short
- * per-member cooldown; transport failures switch without a record;
+ * (credentials are account-level); transient request failures switch without
+ * a shared health record, so auxiliary requests cannot park healthy accounts;
  * everything else — most importantly CONTEXT_WINDOW_EXCEEDED and ABORTED —
  * is the request's own fault and is rethrown untouched.
  * @param error - the failure thrown by a member adapter's stream.
@@ -86,8 +86,10 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
     case 'SERVER':
     case 'TIMEOUT':
     case 'EMPTY_RESPONSE':
-      return { action: 'switch', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
     case 'TRANSPORT':
+      // A failed request is not evidence that this account is unavailable.
+      // In particular, reviewer and foreground calls share this registry.
+      // Fail over within this request, but let the next request/retry probe.
       return { action: 'switch' }
     case 'HTTP_402':
     case 'HTTP_404':
@@ -102,9 +104,10 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
   }
 }
 
-interface HealthRecord {
+export interface HealthRecord {
   unavailableUntil: number
   reason: string
+  failure?: LlmError
 }
 
 /**
@@ -133,11 +136,23 @@ export class PoolHealthRegistry {
   }
 
   /** Park a member for `cooldownMs`; a longer existing cooldown wins. */
-  markUnavailable(key: string, cooldownMs: number, reason: string, now = Date.now()): void {
+  markUnavailable(key: string, cooldownMs: number, reason: string, now = Date.now(), failure?: LlmError): void {
     const until = now + cooldownMs
     const existing = this.records.get(key)
     if (existing !== undefined && existing.unavailableUntil > until) return
-    this.records.set(key, { unavailableUntil: until, reason })
+    this.records.set(key, { unavailableUntil: until, reason, ...failure === undefined ? {} : { failure } })
+  }
+
+  /** The effective blocker: both account and member must recover before a call. */
+  memberBlocker(provider: ProviderId, account: string, model: string, now = Date.now()): HealthRecord | undefined {
+    const keys = [accountKey(provider, account), memberKey(provider, account, model)]
+    let blocker: HealthRecord | undefined
+    for (const key of keys) {
+      if (this.isAvailable(key, now)) continue
+      const record = this.records.get(key)!
+      if (blocker === undefined || record.unavailableUntil > blocker.unavailableUntil) blocker = record
+    }
+    return blocker
   }
 
   /**

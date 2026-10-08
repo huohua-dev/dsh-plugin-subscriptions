@@ -45,7 +45,7 @@ test('image pool: all accounts exhausted is bounded and later calls respect prov
   const options = { provider: 'codex' as const, tokens, signal, rateLimitReset: codexRateLimitReset,
     send: async () => { attempts++; return quota() } }
   for (let i = 0; i < 2; i++) {
-    await assert.rejects(() => pool.request(options), (e: unknown) => e instanceof LlmError && e.code === 'RATE_LIMIT' && (e.failure.providerRetryAfterMs ?? 0) > 3500000)
+    await assert.rejects(() => pool.request(options), (e: unknown) => e instanceof LlmError && e.code === 'QUOTA' && (e.failure.providerRetryAfterMs ?? 0) > 3500000)
   }
   assert.equal(attempts, 2)
 })
@@ -76,6 +76,33 @@ for (const status of [400, 408, 500, 504]) {
     await assert.rejects(() => new ImageAccountPool().request({ provider: 'codex', tokens, signal, rateLimitReset: codexRateLimitReset,
       send: async () => { attempts++; return new Response('failure', { status }) } }))
     assert.equal(attempts, 1)
+  })
+}
+
+for (const status of [400, 408, 500, 504]) {
+  test(`image pool: quota wording on ambiguous HTTP ${status} cannot enable failover`, async () => {
+    const { tokens } = fixture()
+    let attempts = 0
+    await assert.rejects(() => new ImageAccountPool().request({ provider: 'codex', tokens, signal, rateLimitReset: codexRateLimitReset,
+      send: async () => { attempts++; return attempts === 1 ? new Response('quota exceeded', { status }) : new Response('ok') } }))
+    assert.equal(attempts, 1)
+  })
+}
+
+for (const reverse of [false, true]) {
+  test(`image pool: mixed rate/quota failures preserve the retry path (reverse=${reverse})`, async () => {
+    const { tokens } = fixture()
+    const pool = new ImageAccountPool()
+    let attempts = 0
+    const options = { provider: 'codex' as const, tokens, signal, rateLimitReset: codexRateLimitReset,
+      send: async (session: { accessToken: string }) => {
+        attempts++
+        return (session.accessToken === 'first') === reverse ? quota() : new Response('Too many requests', { status: 429, headers: { 'retry-after': '30' } })
+      } }
+    for (let call = 0; call < 2; call++) {
+      await assert.rejects(() => pool.request(options), (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT')
+    }
+    assert.equal(attempts, 2)
   })
 }
 

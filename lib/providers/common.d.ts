@@ -205,17 +205,26 @@ export interface ProviderUsage {
 }
 /** One model discovered from a provider's live model-list endpoint. */
 export interface DiscoveredModel {
-    /** Account-specific server-advertised ceiling for local context overrides. */
+    /**
+     * Account-specific server-advertised ceiling for local context overrides.
+     * Codex-only, and stored raw like Codex's `contextWindow` (input tokens).
+     */
     maxContextWindow?: number;
     /** Wire model id. */
     id: string;
     /** Human-readable display name. */
     name: string;
     description?: string;
-    /** Advertised combined context capacity in tokens. */
+    /**
+     * Advertised context capacity in tokens, stored as the endpoint reports it.
+     * Combined (request + response) for every provider except Codex, whose
+     * catalog reports input-only limits that the adapter converts on resolve.
+     */
     contextWindow?: number;
     /** Server-advertised per-request output token ceiling, when disclosed. */
     maxOutputTokens?: number;
+    /** Copilot-specific: the prompt (input) cap enforced apart from the total window. */
+    maxPromptTokens?: number;
     /** Provider sort hint; lower sorts earlier. */
     priority?: number;
     /** Advertised reasoning efforts, when the provider discloses them. */

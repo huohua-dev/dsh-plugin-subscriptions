@@ -218,8 +218,27 @@ export declare class CodexAdapter extends LlmAdapter {
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */
     resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo>;
-    /** Account-specific bounds; absent maximum conservatively keeps the advertised default. */
+    /**
+     * Account-specific context bounds, in the host's combined (request +
+     * response) tokens.
+     *
+     * The `/models` `context_window` / `max_context_window` fields are INPUT
+     * limits: the GPT-5 family's 272K is its 400K window minus the 128K output
+     * reservation, and the 1M tier advertises 872K. The host reserves
+     * `defaultMaxTokens` out of `contextWindow` before it budgets history, so
+     * passing the raw figure through counted the output twice (a 272K entry left
+     * only 144K of history). The reservation is added back here, so the history
+     * budget equals exactly what the backend accepts as input.
+     *
+     * `standard` is the backend's default tier, `max` the largest window the
+     * account may opt into, and `default` the window used when the user sets no
+     * override: the maximum, because the backend accepts it on every request
+     * (Codex itself only gates it behind a config key). An absent maximum
+     * conservatively keeps the standard window. A configured static
+     * `contextWindow` is already in host units and is used verbatim.
+     */
     contextLimits(model: string, account?: string): Promise<{
+        standard: number;
         default: number;
         max: number;
     }>;

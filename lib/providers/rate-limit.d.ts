@@ -1,12 +1,10 @@
 /**
  * Rate-limit window handling shared by the subscription adapters.
  *
- * A subscription plan is rate-limit shaped by design — a five-hour session
- * window, a weekly window, and on some plans a per-model weekly one — so a 429
- * is not a dead end: the window reopens at a time the provider discloses. This
- * module turns that disclosure into the `providerRetryAfterMs` the optional
- * `@deepseek-ai/dsh-llm-retry` plugin waits out, and resolves the retry policy
- * whose `maxDelayMs` decides how long a route is allowed to hold the turn.
+ * Subscription quota exhaustion ends the current turn; its reset is retained
+ * for account cooldowns. Ordinary request throttling remains retryable. This
+ * module parses reset hints and resolves the retry policy. Long waits for
+ * RATE_LIMIT are opt-in; QUOTA stays terminal regardless of that setting.
  *
  * The wait itself is provider-independent: adapters own the policy, the retry
  * plugin executes it. Only the extraction of the reset instant differs, so each
@@ -160,12 +158,12 @@ export interface RateLimitWait {
 }
 /** Rate-limit waiting as the plugin config accepts it. */
 export interface RateLimitConfig {
-    /** Wait for a disclosed reset instead of failing the turn (default true). */
+    /** Opt in to long waits for ordinary RATE_LIMIT (default false; never retries QUOTA). */
     wait?: boolean;
     /** Ceiling on one wait in milliseconds (default six hours). */
     maxWaitMs?: number;
 }
-/** Waiting behavior a route falls back to when the plugin passed none (waiting on, six-hour ceiling). */
+/** Safe default: short backoff only; the six-hour ceiling requires explicit opt-in. */
 export declare const DEFAULT_RATE_LIMIT_WAIT: RateLimitWait;
 /**
  * Validate and default the rate-limit waiting config.

@@ -9,6 +9,7 @@
  * cooldown (transport blips say nothing about the account), or rethrow
  * (the request itself is at fault and another account would fail alike).
  */
+import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { ProviderId } from '../auth/store.js';
 /** Registry key for one pool member. */
 export declare function memberKey(provider: ProviderId, account: string, model: string): string;
@@ -38,8 +39,8 @@ export type PoolFailureAction = {
  * the provider's own `retry-after` when sent, which is more accurate than
  * any fixed guess) — account-wide for account-metered providers, per-member
  * for model-scoped ones; auth failures park the account until re-login
- * (credentials are account-level); server/timeout failures get a short
- * per-member cooldown; transport failures switch without a record;
+ * (credentials are account-level); transient request failures switch without
+ * a shared health record, so auxiliary requests cannot park healthy accounts;
  * everything else — most importantly CONTEXT_WINDOW_EXCEEDED and ABORTED —
  * is the request's own fault and is rethrown untouched.
  * @param error - the failure thrown by a member adapter's stream.
@@ -47,6 +48,11 @@ export type PoolFailureAction = {
  * @returns the action the pool should take.
  */
 export declare function classifyPoolFailure(error: unknown, provider: ProviderId): PoolFailureAction;
+export interface HealthRecord {
+    unavailableUntil: number;
+    reason: string;
+    failure?: LlmError;
+}
 /**
  * Cooldown registry keyed by {@link memberKey}. A member whose cooldown has
  * expired is simply available again — recovery is proven by the next real
@@ -59,7 +65,9 @@ export declare class PoolHealthRegistry {
     /** Whether one registry key is clear right now. */
     isAvailable(key: string, now?: number): boolean;
     /** Park a member for `cooldownMs`; a longer existing cooldown wins. */
-    markUnavailable(key: string, cooldownMs: number, reason: string, now?: number): void;
+    markUnavailable(key: string, cooldownMs: number, reason: string, now?: number, failure?: LlmError): void;
+    /** The effective blocker: both account and member must recover before a call. */
+    memberBlocker(provider: ProviderId, account: string, model: string, now?: number): HealthRecord | undefined;
     /**
      * Epoch ms at which the earliest cooling record among `keys` recovers;
      * `undefined` when none of them is cooling. The registry is shared by

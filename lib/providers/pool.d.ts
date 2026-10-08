@@ -101,10 +101,6 @@ export declare class PoolAdapter extends LlmAdapter {
     private select;
     /** Pin the serving member to the session (with bounded memory). */
     private remember;
-    /**
-     * The error for an exhausted pool, carrying the earliest recovery hint of
-     * THIS pool's members (the health registry is shared across pools, so the
-     * hint is scoped to the keys this pool can actually recover through).
-     */
+    /** Preserve real failures, including when every member was skipped by health. */
     private exhausted;
 }

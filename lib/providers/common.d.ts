@@ -50,11 +50,9 @@ export interface HttpLlmErrorOptions {
  * stable code and, for a rate-limited request, the disclosed reset instant to
  * the `providerRetryAfterMs` the retry plugin waits out.
  *
- * A 429 classifies as `RATE_LIMIT` on the strength of the status alone, ahead
- * of the quota-wording check. On these routes there is no terminal quota to
- * distinguish: a subscription has no balance to top up, only a window that
- * reopens, and providers announce an exhausted window with wording
- * (`usage_limit_reached`) the shared classifier reads as permanent.
+ * Explicit subscription exhaustion stays QUOTA even on HTTP 429: a future
+ * reset is a pool cooldown hint, not permission to hold the current turn open.
+ * Ordinary burst throttling remains RATE_LIMIT.
  * @param response - the failed response.
  * @param label - diagnostic prefix naming the provider API.
  * @param options - the calling provider's rate-limit reader and warning sink.

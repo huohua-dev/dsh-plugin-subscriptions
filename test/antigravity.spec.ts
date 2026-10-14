@@ -11,10 +11,13 @@ import type { AntigravitySession } from '../src/auth/store.js'
 import {
   AntigravityAdapter,
   ANTIGRAVITY_AUTHORIZE_URL,
+  ANTIGRAVITY_DEFAULT_USER_AGENT,
+  ANTIGRAVITY_IDE_VERSION,
   ANTIGRAVITY_TOKEN_URL,
   ANTIGRAVITY_USERINFO_URL,
   antigravityFlow,
   antigravityGenerateURL,
+  antigravityUserAgent,
   exchangeAntigravityCode,
   fetchAntigravityModels,
   fetchAntigravityUsage,
@@ -169,6 +172,52 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
     ['other', 'gemini-3-flash', 30],
     ['weekly', 'gemini-3-flash', 60],
   ])
+})
+
+test('Antigravity presents the 2.x desktop identity, falling back from a blank configured agent', async () => {
+  // A 1.x agent hides the per-effort Gemini 3.8 Flash ids from the catalog
+  // and 404s them on generate, so the default must be the IDE 2.x form.
+  assert.equal(antigravityUserAgent('darwin', 'arm64'), `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} darwin/arm64`)
+  assert.equal(antigravityUserAgent('linux', 'x64'), `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} linux/amd64`)
+  assert.equal(antigravityUserAgent('win32', 'x64'), `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} windows/amd64`)
+  assert.equal(ANTIGRAVITY_DEFAULT_USER_AGENT, antigravityUserAgent(process.platform, process.arch))
+  assert.match(ANTIGRAVITY_DEFAULT_USER_AGENT, /^antigravity\/ide\/2\.\d+\.\d+ \S+\/\S+$/)
+
+  const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
+  const agentOf = async (userAgent: string | undefined): Promise<string | null> => {
+    const calls: RecordedCall[] = []
+    await fetchAntigravityModels(session, { ...runtime, ...userAgent === undefined ? {} : { userAgent } },
+      routed({ [modelsURL]: { models: { 'gemini-3-flash': {} } } }, calls))
+    return new Headers(calls[0].init?.headers).get('user-agent')
+  }
+  assert.equal(await agentOf(undefined), ANTIGRAVITY_DEFAULT_USER_AGENT)
+  assert.equal(await agentOf(''), ANTIGRAVITY_DEFAULT_USER_AGENT)
+  assert.equal(await agentOf('   '), ANTIGRAVITY_DEFAULT_USER_AGENT)
+  assert.equal(await agentOf('custom/1.0'), 'custom/1.0')
+})
+
+test('Antigravity drops disabled and *-disabled placeholder entries from models and usage', async () => {
+  // Plan-gated launches (Gemini 4 Argon below AI Ultra) ride along as
+  // placeholders that fail every request; they must not reach the picker.
+  const fetchFn = routed({
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: {
+      models: {
+        'gemini-3.8-flash-high': { displayName: 'Gemini 3.8 Flash (High)', quotaInfo: { remainingFraction: 0.5 } },
+        'gemini-4-argon-disabled': { displayName: 'Gemini 4 Argon', quotaInfo: { remainingFraction: 0 } },
+        'gemini-4-argon-high': { displayName: 'Gemini 4 Argon (High)', disabled: true, quotaInfo: { remainingFraction: 0 } },
+      },
+    },
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: { paidTier: { name: 'Google AI Pro' } },
+  })
+  const models = await fetchAntigravityModels(session, runtime, fetchFn)
+  assert.deepEqual(models.map(model => model.id), ['gemini-3.8-flash-high'])
+  const usage = await fetchAntigravityUsage(session, runtime, fetchFn)
+  assert.deepEqual(usage.windows?.map(window => window.scope), ['gemini-3.8-flash-high'])
+
+  // A catalog of nothing but placeholders is empty, not a picker of dead ids.
+  await assert.rejects(fetchAntigravityModels(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: { models: { 'gemini-4-argon-disabled': {} } },
+  })), /empty catalog/)
 })
 
 test('request conversion carries system, images, tools, tool results, and signed tool replay', () => {

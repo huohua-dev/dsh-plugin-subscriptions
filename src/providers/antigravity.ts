@@ -56,7 +56,27 @@ export const ANTIGRAVITY_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 export const ANTIGRAVITY_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
 export const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
 export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
-export const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-subscriptions'
+/**
+ * IDE version the backend sees. The catalog and model routing are gated on the
+ * desktop identity: with a 1.x agent the backend withholds the per-effort
+ * Gemini 3.8 Flash ids (`gemini-3.8-flash-high/medium/low`, 404 on generate)
+ * and offers only `gemini-3.8-flash-tiered`.
+ */
+export const ANTIGRAVITY_IDE_VERSION = '2.11.0'
+
+/** Go-style OS/arch pair the desktop client appends (`darwin/arm64`, `windows/amd64`). */
+function antigravityPlatform(platform: string, arch: string): string {
+  const os = platform === 'win32' ? 'windows' : platform
+  const cpu = arch === 'x64' ? 'amd64' : arch === 'ia32' ? '386' : arch
+  return `${os}/${cpu}`
+}
+
+/** The Antigravity desktop user agent for one platform: `antigravity/ide/<version> <os>/<arch>`. */
+export function antigravityUserAgent(platform: string = process.platform, arch: string = process.arch): string {
+  return `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} ${antigravityPlatform(platform, arch)}`
+}
+
+export const ANTIGRAVITY_DEFAULT_USER_AGENT = antigravityUserAgent()
 export const ANTIGRAVITY_PREEMPT_MS = 5 * 60_000
 const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback'
 // Fallback only when the catalog omits a window: Gemini's 1,048,576-token limit.
@@ -183,11 +203,12 @@ interface AntigravityAccountInfo {
 }
 
 /** Shared Antigravity API headers. */
-export function antigravityHeaders(accessToken: string, userAgent = ANTIGRAVITY_DEFAULT_USER_AGENT): Record<string, string> {
+export function antigravityHeaders(accessToken: string, userAgent?: string): Record<string, string> {
   return {
     'authorization': `Bearer ${accessToken}`,
     'content-type': 'application/json',
-    'user-agent': userAgent,
+    // A blank configured value (the config form's empty field) means the default.
+    'user-agent': userAgent?.trim() || ANTIGRAVITY_DEFAULT_USER_AGENT,
   }
 }
 
@@ -370,6 +391,8 @@ interface AntigravityWireModel {
   supportsImages?: boolean
   /** Editor-internal models (tab completion, inline chat) with no agent surface. */
   isInternal?: boolean
+  /** Listed but not servable for this account (plan-gated launches). */
+  disabled?: boolean
   quotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuota?: { remainingFraction?: number; resetTime?: string }
@@ -388,13 +411,21 @@ function tokenCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
+/** A catalog entry the account cannot use: flagged `disabled` or a `*-disabled` placeholder id. */
+function isDisabledModel(id: string, model: AntigravityWireModel): boolean {
+  return model.disabled === true || id.toLowerCase().endsWith('-disabled')
+}
+
 /**
  * Whether a catalog entry can serve an agent turn. The catalog also lists the
  * editor's tab-completion and inline models (16K-32K windows, flagged
  * `isInternal` or named in `tabModelIds`, `tab_*` ids) and the image
  * generator; offering them in the picker only produces failing sessions.
+ * Plan-gated launches also appear as `disabled: true` entries or `*-disabled`
+ * placeholders (Gemini 4 Argon below AI Ultra); both fail every request.
  */
 function isAgentModel(id: string, model: AntigravityWireModel, payload: AntigravityModelsResponse): boolean {
+  if (isDisabledModel(id, model)) return false
   if (model.isInternal === true || id.startsWith('tab_')) return false
   if (payload.tabModelIds?.includes(id) === true) return false
   return payload.imageGenerationModelIds?.includes(id) !== true
@@ -478,6 +509,8 @@ export async function fetchAntigravityUsage(
   ])
   const windows: UsageWindow[] = []
   for (const [modelId, model] of Object.entries(models.models ?? {})) {
+    // A placeholder's quota is not one the account can spend.
+    if (isDisabledModel(modelId, model)) continue
     const ordinary = usageWindow('other', modelId, model.quotaInfo)
     const weekly = usageWindow('weekly', modelId, model.weeklyQuotaInfo ?? model.weeklyQuota)
     if (ordinary !== undefined) windows.push(ordinary)

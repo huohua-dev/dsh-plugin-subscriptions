@@ -304,12 +304,12 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 250_000, maxTokens: 64_000, inputModalities: ['text', 'image'] },
     { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', contextWindow: 250_000, maxTokens: 64_000, inputModalities: ['text', 'image'] },
   ],
-  // The Muse CLI's built-in models; the live /v1/models list wins when it is
-  // non-empty (it currently answers an empty list, as it does for the CLI).
+  // Static fallback only: the live /muse-code/models catalog wins whenever it
+  // answers (Meta returns an empty one to gated networks). Limits mirror it.
   muse: [
-    { id: 'muse-spark-1.3', name: 'Muse Spark 1.3' },
-    { id: 'muse-spark-1.3-contributor', name: 'Muse Spark 1.3 (Contributor)' },
-    { id: 'muse-spark-1.2', name: 'Muse Spark 1.2' },
+    { id: 'muse-wonder-1.0', name: 'Muse Wonder 1.0', contextWindow: 1_007_997, maxTokens: 128_000, inputModalities: ['text', 'image'] },
+    { id: 'muse-spark-1.3', name: 'Muse Spark 1.3', contextWindow: 1_007_997, maxTokens: 128_000, inputModalities: ['text', 'image'] },
+    { id: 'muse-spark-1.2', name: 'Muse Spark 1.2', contextWindow: 1_007_997, maxTokens: 128_000, inputModalities: ['text', 'image'] },
   ],
 }
 

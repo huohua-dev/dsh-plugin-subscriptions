@@ -143,15 +143,47 @@ test('museUsageFromKey maps the 5-hour and weekly windows with second-based rese
   assert.equal(odd.windows?.[0]?.kind, 'other', 'a non-5-hour short window is not mislabelled')
 })
 
-test('fetchMuseModels filters non-chat models and treats an empty list as a failure', async () => {
+/** One live `/muse-code/models` entry (shape as served). */
+const catalogEntry = (id: string, meta: Record<string, unknown> = {}) => ({
+  id,
+  object: 'model',
+  owned_by: 'meta',
+  metadata: {
+    'muse-code': {
+      name: id, family: 'avocado', is_hidden: false, attachment: true, reasoning: true, tool_call: true,
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      limit: { context: 1_007_997, output: 128_000 },
+      options: { reasoningEffort: 'high', include: ['reasoning.encrypted_content'] },
+      variants: Object.fromEntries(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(e => [e, { reasoningEffort: e }])),
+      ...meta,
+    },
+  },
+})
+
+test('fetchMuseModels reads the muse-code catalog and treats an empty list as a gated network', async () => {
   const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 1e6 }
-  await assert.rejects(fetchMuseModels(session, recordingFetch(() => json({ object: 'list', data: [] })).fetchFn), /empty catalog/)
-  const models = await fetchMuseModels(session, recordingFetch(() => json({
-    data: [{ id: 'muse-spark-1.3' }, { id: 'muse-voice-transcribe-1.0' }, { id: 'muse-spark-1.3-contributor' }],
-  })).fetchFn)
-  assert.deepEqual(models.map(model => model.id), ['muse-spark-1.3', 'muse-spark-1.3-contributor'])
-  assert.equal(models[1]?.name, 'Muse Spark 1.3 Contributor')
-  assert.deepEqual(models[0]?.reasoning?.efforts.map(effort => effort.id), ['minimal', 'low', 'medium', 'high', 'xhigh'])
+  await assert.rejects(
+    fetchMuseModels(session, recordingFetch(() => json({ object: 'list', data: [] })).fetchFn),
+    /empty catalog\. Meta returns an empty model catalog to some networks/,
+  )
+  const { calls, fetchFn } = recordingFetch(() => json({
+    object: 'list',
+    data: [
+      catalogEntry('muse-wonder-1.0'),
+      catalogEntry('muse-image-1.0', { is_hidden: true, tool_call: false, modalities: { input: ['text', 'image'], output: ['image'] }, limit: null }),
+      catalogEntry('muse-spark-1.3-contributor', { variants: { low: { reasoningEffort: 'low' } }, options: {} }),
+    ],
+  }))
+  const models = await fetchMuseModels(session, fetchFn)
+  assert.equal(calls[0]?.url, 'https://api.meta.ai/muse-code/models')
+  assert.deepEqual(models.map(model => model.id), ['muse-wonder-1.0', 'muse-spark-1.3-contributor'])
+  assert.equal(models[0]?.name, 'Muse Wonder 1.0')
+  assert.equal(models[0]?.contextWindow, 1_007_997)
+  assert.equal(models[0]?.maxOutputTokens, 128_000)
+  assert.deepEqual(models[0]?.inputModalities, ['text', 'image'])
+  assert.deepEqual(models[0]?.reasoning?.efforts.map(effort => effort.id), ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.equal(models[0]?.reasoning?.defaultEffort, 'high')
+  assert.deepEqual(models[1]?.reasoning, { efforts: [{ id: 'low', name: 'Low' }] }, 'per-model variants win; no default it does not list')
   assert.equal(museModelName('muse-spark-1.2'), 'Muse Spark 1.2')
 })
 
@@ -232,6 +264,7 @@ function museAdapter(fetchFn: typeof fetch): MuseAdapter {
     tokens: memoryTokens({ accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }),
     discovery: false,
     fetchFn,
+    modelNotFoundBackoffMs: [1, 1],
   })
 }
 
@@ -305,7 +338,7 @@ test('replay is skipped for another model or account, and a 400 on replay retrie
   assert.equal(chunks.at(-1)?.type, 'finish')
 })
 
-test('the static catalog serves while the live list is empty, with the Muse effort scale', async () => {
+test('a gated network falls back to the static catalog with one warning; a persistent model 404 is a retryable server failure', async () => {
   const { fetchFn } = recordingFetch(() => json({ object: 'list', data: [] }))
   const warnings: string[] = []
   const adapter = new MuseAdapter({
@@ -318,9 +351,42 @@ test('the static catalog serves while the live list is empty, with the Muse effo
   })
   const models = await adapter.listOwnModels('muse')
   assert.deepEqual(models.map(model => model.id), ['muse-spark-1.3'])
-  assert.deepEqual(warnings, [], 'an empty server catalog is the normal state, not a warning')
+  await adapter.listOwnModels('muse')
+  assert.equal(warnings.length, 1, 'the gated-catalog warning is not repeated on every picker read')
+  assert.match(warnings[0] ?? '', /empty model catalog to some networks/)
   const info = await adapter.resolveOwnModel('muse', 'muse-spark-1.3')
   assert.equal(info.reasoning?.defaultEffort, 'high')
-  assert.equal(info.context?.contextWindow, 1_048_576)
+  assert.deepEqual(info.reasoning?.efforts.map(effort => effort.id), ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.equal(info.context?.contextWindow, 1_007_997)
   assert.deepEqual(info.inputModalities, ['text', 'image'])
+
+  const notFound = recordingFetch(() =>
+    json({ error: { code: 'model_not_found', message: 'The requested model was not found.' } }, 404))
+  await assert.rejects(
+    collect(museAdapter(notFound.fetchFn).stream({ provider: 'muse', model: 'muse-spark-1.3', messages: [USER] } as unknown as GenerateOptions)),
+    (error: Error & { code?: string }) => error.code === 'SERVER'
+      && /intermittently answers model_not_found/.test(error.message) && /after 3 attempts/.test(error.message),
+  )
+  assert.equal(notFound.calls.length, 3, 'two backoff retries after the first attempt')
+})
+
+test('a transient model_not_found is retried until the gateway serves the model', async () => {
+  const { calls, fetchFn } = recordingFetch((_url, _init, index) => index < 2
+    ? json({ error: { code: 'model_not_found', message: 'The requested model was not found.' } }, 404)
+    : sse(TEXT_EVENTS))
+  const chunks = await collect(museAdapter(fetchFn).stream({
+    provider: 'muse', model: 'muse-wonder-1.0', messages: [USER],
+  } as unknown as GenerateOptions))
+  assert.equal(calls.length, 3)
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop')
+})
+
+test('an unrelated 404 is not retried', async () => {
+  const { calls, fetchFn } = recordingFetch(() => json({ title: 'Not Found', detail: "Path '/x' was not found" }, 404))
+  await assert.rejects(
+    collect(museAdapter(fetchFn).stream({ provider: 'muse', model: 'muse-wonder-1.0', messages: [USER] } as unknown as GenerateOptions)),
+    (error: Error & { code?: string }) => error.code === 'HTTP_404',
+  )
+  assert.equal(calls.length, 1)
 })

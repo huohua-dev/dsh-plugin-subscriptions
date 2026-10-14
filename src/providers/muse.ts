@@ -80,7 +80,8 @@ export const MUSE_DEVICE_TOKEN_URL = 'https://auth.meta.com/oidc/device/token/'
 /** Exchanges the OIDC identity token for the Model API key (and reports tier + usage). */
 export const MUSE_KEY_URL = 'https://api.meta.ai/muse-code/key'
 export const MUSE_API_URL = 'https://api.meta.ai/v1/responses'
-export const MUSE_MODELS_URL = 'https://api.meta.ai/v1/models'
+/** The Muse CLI's catalog: per-model limits, modalities, efforts, visibility. */
+export const MUSE_MODELS_URL = 'https://api.meta.ai/muse-code/models'
 /** Muse CLI release this plugin presents itself as (user agent only). */
 export const MUSE_CLI_VERSION = '1.4.7'
 /**
@@ -91,15 +92,17 @@ export const MUSE_CLI_VERSION = '1.4.7'
 export const MUSE_KEY_TTL_MS = 24 * 3_600_000
 /** Refresh when the key has less than this much of its assumed life left. */
 export const MUSE_PREEMPT_MS = 5 * 60_000
-const MUSE_CONTEXT_WINDOW = 1_048_576
+/** Context limit the live catalog reports for every Muse chat model. */
+const MUSE_CONTEXT_WINDOW = 1_007_997
 /** The Muse CLI's own per-request output cap; Muse reasons heavily before any text. */
 const MUSE_DEFAULT_MAX_TOKENS = 128_000
 
 /**
- * Efforts the Responses endpoint accepts (live-verified by muse-cc: `none`,
- * `max` and unknown values answer 400). `high` is the Muse CLI's default.
+ * Efforts the Responses endpoint accepts, in display order (live-verified:
+ * `none` answers 400 "Supported values: [minimal, low, medium, high, xhigh,
+ * max]"). `high` is the catalog's and the Muse CLI's default.
  */
-const MUSE_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const
+const MUSE_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 const MUSE_DEFAULT_EFFORT = 'high'
 
 /** Fields Meta uses to name a delay or reset in an error body. */
@@ -292,7 +295,7 @@ export async function fetchMuseUsage(
   return usage.plan === undefined && session.plan !== undefined ? { ...usage, plan: session.plan } : usage
 }
 
-/** Static reasoning block every Muse Spark model advertises. */
+/** Static reasoning block every Muse chat model advertises. */
 function museReasoning(): NonNullable<DiscoveredModel['reasoning']> {
   return {
     efforts: MUSE_EFFORTS.map(effort => ({ id: ReasoningEffortId(effort), name: effortDisplayName(effort) })),
@@ -305,18 +308,71 @@ export function museModelName(id: string): string {
   return id.split('-').map(part => /^\d/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)).join(' ')
 }
 
-/**
- * The model list also serves non-chat models (voice transcription, image
- * generation, embeddings) the picker must not offer.
- */
-function isChatModel(id: string): boolean {
-  return !/voice|transcri|image|embed|tts|speech/i.test(id)
+/** The `metadata["muse-code"]` block of one catalog entry (subset). */
+interface MuseCatalogMeta {
+  name?: string
+  is_hidden?: boolean
+  tool_call?: boolean
+  modalities?: { input?: string[]; output?: string[] }
+  limit?: { context?: number; output?: number } | null
+  options?: { reasoningEffort?: string }
+  variants?: Record<string, { reasoningEffort?: string }>
 }
 
 /**
- * Fetch the live model list. An empty list from a 200 response is a discovery
- * failure (the static catalog then serves), matching the Muse CLI, which ships
- * built-in models and treats the server catalog as an overlay.
+ * Meta gates the model catalog on the caller's network: from some egress IPs
+ * (commercial proxy exits among them) it answers an empty list on every call,
+ * while the same key lists every model from another network. Inference is not
+ * gated the same way (see {@link MUSE_MODEL_NOT_FOUND_HINT}), so the built-in
+ * catalog serves instead.
+ */
+export const MUSE_NETWORK_HINT = 'Meta returns an empty model catalog to some networks (the same account lists '
+  + 'its models from another egress); the built-in Muse catalog is used instead'
+
+/**
+ * Meta's Responses gateway intermittently answers 404 `model_not_found` for
+ * models the account is entitled to: the same key and request succeed moments
+ * later (observed from every network, far more often from some proxy exits).
+ */
+export const MUSE_MODEL_NOT_FOUND_HINT = 'Meta intermittently answers model_not_found for models this subscription includes; '
+  + 'it is retried automatically. If it keeps failing, route api.meta.ai through another network'
+
+/** A 404 body naming a missing model (Responses and Messages wire spellings). */
+const MUSE_MODEL_NOT_FOUND = /model_not_found|model not found or access denied/i
+
+/** Waits between retries of a transient `model_not_found` (five retries, ~10 s worst case). */
+export const MUSE_MODEL_NOT_FOUND_BACKOFF_MS: readonly number[] = [500, 1000, 2000, 3000, 4000]
+
+/** Sleep for `ms`, rejecting early when the signal aborts. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return }
+    const onAbort = (): void => { clearTimeout(timer); reject(signal.reason) }
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** Efforts one catalog entry advertises, in canonical order; undefined when it lists none. */
+function catalogReasoning(meta: MuseCatalogMeta): NonNullable<DiscoveredModel['reasoning']> | undefined {
+  const variants = Object.values(meta.variants ?? {})
+    .map(variant => variant?.reasoningEffort)
+    .filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
+  if (variants.length === 0) return undefined
+  const known = MUSE_EFFORTS.filter(effort => variants.includes(effort))
+  const extra = variants.filter(effort => !(MUSE_EFFORTS as readonly string[]).includes(effort))
+  const efforts = [...known, ...extra].map(effort => ({ id: ReasoningEffortId(effort), name: effortDisplayName(effort) }))
+  const preferred = meta.options?.reasoningEffort
+  const fallback = efforts.some(effort => effort.id === MUSE_DEFAULT_EFFORT) ? MUSE_DEFAULT_EFFORT : undefined
+  const defaultEffort = typeof preferred === 'string' && efforts.some(effort => effort.id === preferred) ? preferred : fallback
+  return { efforts, ...defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultEffort) } }
+}
+
+/**
+ * Fetch the live model catalog the Muse CLI uses. Hidden entries and models
+ * that cannot chat (image generation, voice) are dropped. An empty list from a
+ * 200 response is a discovery failure (the static catalog then serves); it is
+ * what Meta answers to a gated network (see {@link MUSE_NETWORK_HINT}).
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation.
@@ -337,22 +393,29 @@ export async function fetchMuseModels(
     ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await oauthEndpointError(response, 'muse models')
-  const payload = await response.json() as { data?: { id?: string; name?: string; context_window?: number; max_output_tokens?: number }[] }
+  const payload = await response.json() as { data?: { id?: string; metadata?: { 'muse-code'?: MuseCatalogMeta } }[] }
   if (!Array.isArray(payload.data)) throw new Error('muse models endpoint returned no data array')
   const seen = new Set<string>()
   const discovered: DiscoveredModel[] = []
   for (const entry of payload.data) {
-    if (typeof entry.id !== 'string' || entry.id.length === 0 || seen.has(entry.id) || !isChatModel(entry.id)) continue
+    if (typeof entry.id !== 'string' || entry.id.length === 0 || seen.has(entry.id)) continue
+    const meta = entry.metadata?.['muse-code'] ?? {}
+    if (meta.is_hidden === true || meta.tool_call === false) continue
+    if (Array.isArray(meta.modalities?.output) && !meta.modalities.output.includes('text')) continue
     seen.add(entry.id)
+    const input = (meta.modalities?.input ?? []).filter((modality): modality is 'text' | 'image' => modality === 'text' || modality === 'image')
+    const name = nonEmpty(meta.name)
     discovered.push({
       id: entry.id,
-      name: nonEmpty(entry.name) ?? museModelName(entry.id),
-      ...typeof entry.context_window === 'number' && entry.context_window > 0 ? { contextWindow: entry.context_window } : {},
-      ...typeof entry.max_output_tokens === 'number' && entry.max_output_tokens > 0 ? { maxOutputTokens: entry.max_output_tokens } : {},
-      reasoning: museReasoning(),
+      // The catalog's name is usually the bare id; prettify those.
+      name: name === undefined || name === entry.id ? museModelName(entry.id) : name,
+      ...typeof meta.limit?.context === 'number' && meta.limit.context > 0 ? { contextWindow: meta.limit.context } : {},
+      ...typeof meta.limit?.output === 'number' && meta.limit.output > 0 ? { maxOutputTokens: meta.limit.output } : {},
+      ...input.includes('text') ? { inputModalities: input } : {},
+      reasoning: catalogReasoning(meta) ?? museReasoning(),
     })
   }
-  if (discovered.length === 0) throw new Error('muse models endpoint returned an empty catalog')
+  if (discovered.length === 0) throw new Error(`muse models endpoint returned an empty catalog. ${MUSE_NETWORK_HINT}`)
   return discovered
 }
 
@@ -480,6 +543,8 @@ export interface MuseAdapterOptions {
   defaultEffortOf?: (model: string) => string | undefined
   /** How long this route may hold a turn open waiting for a rate-limit window. */
   rateLimit?: RateLimitWait
+  /** Waits between retries of a transient `model_not_found` (tests shorten it). */
+  modelNotFoundBackoffMs?: readonly number[]
 }
 
 /** Muse wire adapter: one instance serves the `muse` provider route. */
@@ -489,6 +554,7 @@ export class MuseAdapter extends LlmAdapter {
   private accountCatalogsInvalidated = false
   private readonly invalidatedAccounts = new Set<string>()
   private catalogOwner: string | undefined
+  private warnedEmptyCatalog = false
 
   constructor(private readonly options: MuseAdapterOptions) {
     super()
@@ -538,8 +604,10 @@ export class MuseAdapter extends LlmAdapter {
     return cache
   }
 
-  private modalities(model: string): readonly ('text' | 'image')[] {
-    return this.options.models.find(entry => entry.id === model)?.inputModalities ?? ['text', 'image']
+  private modalities(model: string, discovered?: DiscoveredModel): readonly ('text' | 'image')[] {
+    return this.options.models.find(entry => entry.id === model)?.inputModalities
+      ?? discovered?.inputModalities
+      ?? ['text', 'image']
   }
 
   private listed(provider: string, discovered: readonly DiscoveredModel[]): LlmModelInfo[] {
@@ -547,7 +615,7 @@ export class MuseAdapter extends LlmAdapter {
       provider,
       id: model.id,
       name: model.name,
-      inputModalities: this.modalities(model.id),
+      inputModalities: this.modalities(model.id, model),
     }))
   }
 
@@ -604,11 +672,13 @@ export class MuseAdapter extends LlmAdapter {
     } catch (error: unknown) {
       if (isDiscoveryAborted(error, signal)) throw error
       if (isMissingOrInvalidCredential(error)) return []
-      // An empty server catalog is the normal state today (the Muse CLI's own
-      // catalog cache is empty too), so it is not worth a warning.
-      if (!(error instanceof Error && /empty catalog/.test(error.message))) {
+      // A gated network answers an empty catalog on every refresh: say so
+      // once per adapter instead of on every picker read.
+      const gated = error instanceof Error && /empty catalog/.test(error.message)
+      if (!gated || !this.warnedEmptyCatalog) {
         this.options.onWarn?.(`muse model discovery failed; using the built-in catalog (${errorChain(error)})`)
       }
+      if (gated) this.warnedEmptyCatalog = true
       return this.staticModels(provider)
     }
   }
@@ -642,7 +712,7 @@ export class MuseAdapter extends LlmAdapter {
       provider,
       id: model,
       name: discovered?.name ?? configured?.name ?? museModelName(model),
-      inputModalities: this.modalities(model),
+      inputModalities: this.modalities(model, discovered),
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? MUSE_CONTEXT_WINDOW },
       defaultMaxTokens: configured?.maxTokens ?? discovered?.maxOutputTokens ?? MUSE_DEFAULT_MAX_TOKENS,
       ...reasoning === undefined ? {} : { reasoning },
@@ -675,25 +745,55 @@ export class MuseAdapter extends LlmAdapter {
         options,
         toResponsesInput(messages, options.system, replaying ? callId => replay.get(callId) : undefined),
       ))
-      let response = await this.request(body(), session, options.sessionId, watchdog.signal)
-      if (response.status === 401) {
-        // One forced re-mint + retry on an unexpired-but-rejected key.
-        session = await this.options.tokens.session(account, true)
-        response = await this.request(body(), session, options.sessionId, watchdog.signal)
+      const send = async (): Promise<Response> => {
+        let response = await this.request(body(), session, options.sessionId, watchdog.signal)
+        if (response.status === 401) {
+          // One forced re-mint + retry on an unexpired-but-rejected key.
+          await response.body?.cancel().catch(() => undefined)
+          session = await this.options.tokens.session(account, true)
+          response = await this.request(body(), session, options.sessionId, watchdog.signal)
+        }
+        if (response.status === 400 && replaying) {
+          // A gateway that rejects the replayed reasoning items must not break
+          // the conversation: retry once without them (the model re-derives).
+          await response.body?.cancel().catch(() => undefined)
+          replaying = false
+          this.options.onWarn?.('muse rejected replayed reasoning items; retrying the request without them')
+          response = await this.request(body(), session, options.sessionId, watchdog.signal)
+        }
+        return response
       }
-      if (response.status === 400 && replaying) {
-        // A gateway that rejects the replayed reasoning items must not break
-        // the conversation: retry once without them (the model re-derives).
-        await response.body?.cancel().catch(() => undefined)
-        replaying = false
-        this.options.onWarn?.('muse rejected replayed reasoning items; retrying the request without them')
-        response = await this.request(body(), session, options.sessionId, watchdog.signal)
+      const backoff = this.options.modelNotFoundBackoffMs ?? MUSE_MODEL_NOT_FOUND_BACKOFF_MS
+      let response = await send()
+      let modelNotFound = false
+      for (let attempt = 0; response.status === 404; attempt++) {
+        // Body read once here; a rebuilt Response carries it to the error path.
+        const text = await response.text().catch(() => '')
+        modelNotFound = MUSE_MODEL_NOT_FOUND.test(text)
+        if (!modelNotFound || attempt >= backoff.length) {
+          response = new Response(text, { status: 404, statusText: response.statusText, headers: response.headers })
+          break
+        }
+        await sleep(backoff[attempt]!, watchdog.signal)
+        response = await send()
       }
       if (!response.ok) {
-        throw await httpLlmError(response, 'muse API', {
+        const error = await httpLlmError(response, 'muse API', {
           rateLimitReset: museRateLimitReset,
           ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
         })
+        if (modelNotFound) {
+          // Transient on Meta's side (the same request succeeds moments later
+          // from the same network): report it as a server failure so the
+          // harness retries and a pool does not park the account, and name
+          // the cause instead of suggesting the model or account is wrong.
+          throw new LlmError(
+            `${error.message}. ${MUSE_MODEL_NOT_FOUND_HINT} (still failing after ${String(backoff.length + 1)} attempts)`,
+            'SERVER',
+            { status: 404, cause: error },
+          )
+        }
+        throw error
       }
       if (response.body === null) {
         throw new LlmError('muse API returned no response body', EMPTY_RESPONSE_CODE)

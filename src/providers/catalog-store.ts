@@ -162,23 +162,58 @@ async function readCatalogFile(path: string): Promise<CatalogFile> {
   }
 }
 
+/**
+ * Windows refuses to replace a file another handle holds open without
+ * `FILE_SHARE_DELETE` (an indexer, antivirus scan, or a second dsh profile
+ * reading the cache), surfacing as a transient `EPERM`/`EBUSY`/`EACCES` on
+ * `rename` (issue #129). Retry briefly before giving the write up.
+ */
+const RENAME_RETRY_CODES: ReadonlySet<string> = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const RENAME_RETRIES = 5
+const RENAME_RETRY_DELAY_MS = 20
+
+/** `rename` with a short bounded retry on share-mode conflicts. */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= RENAME_RETRIES || code === undefined || !RENAME_RETRY_CODES.has(code)) throw error
+      await new Promise(resolve => setTimeout(resolve, RENAME_RETRY_DELAY_MS * (attempt + 1)))
+    }
+  }
+}
+
 /** Persist the whole file atomically (tmp file + rename). */
 async function writeCatalogFile(store: CatalogFile, path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
   try {
     await writeFile(tmp, JSON.stringify(store, null, 2))
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true })
     throw error
   }
 }
 
+/** Serialize snapshot updates so parallel account discoveries cannot erase siblings. */
+const catalogWrites = new Map<string, Promise<void>>()
+function updateCatalogFile(path: string, update: (store: CatalogFile) => boolean): Promise<void> {
+  const pending = (catalogWrites.get(path) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    const store = await readCatalogFile(path)
+    if (update(store)) await writeCatalogFile(store, path)
+  })
+  catalogWrites.set(path, pending)
+  void pending.finally(() => { if (catalogWrites.get(path) === pending) catalogWrites.delete(path) }).catch(() => undefined)
+  return pending
+}
+
 /**
  * Build the durable half of one provider's catalog cache over the shared
- * models.json file (concurrent writers are last-writer-wins, acceptable for
- * a cache).
+ * models.json file. Snapshot mutations are serialized across providers/accounts.
  * @param provider - the provider route keying the file entry.
  * @param path - store file path; defaults to {@link modelsFilePath}.
  * @returns the persistence hooks for {@link ModelCatalogCache}.
@@ -189,15 +224,14 @@ export function catalogStore(provider: ProviderId, path = modelsFilePath()): Cat
       return sanitizeSnapshot((await readCatalogFile(path))[provider])
     },
     async save(snapshot) {
-      const store = await readCatalogFile(path)
-      store[provider] = snapshot
-      await writeCatalogFile(store, path)
+      await updateCatalogFile(path, store => { store[provider] = snapshot; return true })
     },
     async clear() {
-      const store = await readCatalogFile(path)
-      if (store[provider] === undefined) return
-      delete store[provider]
-      await writeCatalogFile(store, path)
+      await updateCatalogFile(path, store => {
+        if (store[provider] === undefined) return false
+        delete store[provider]
+        return true
+      })
     },
   }
 }
@@ -219,22 +253,24 @@ export function accountCatalogStore(provider: ProviderId, account: string, path 
       return section !== undefined && Object.hasOwn(section, account) ? sanitizeSnapshot(section[account]) : undefined
     },
     async save(snapshot) {
-      const store = await readCatalogFile(path)
-      const accounts = typeof store.accounts === 'object' && store.accounts !== null && !Array.isArray(store.accounts)
-        ? store.accounts as Record<string, unknown>
-        : {}
-      const section = { ...accountSection(store, provider) ?? {}, [account]: snapshot }
-      store.accounts = { ...accounts, [provider]: section }
-      await writeCatalogFile(store, path)
+      await updateCatalogFile(path, store => {
+        const accounts = typeof store.accounts === 'object' && store.accounts !== null && !Array.isArray(store.accounts)
+          ? store.accounts as Record<string, unknown>
+          : {}
+        const section = { ...accountSection(store, provider) ?? {}, [account]: snapshot }
+        store.accounts = { ...accounts, [provider]: section }
+        return true
+      })
     },
     async clear() {
-      const store = await readCatalogFile(path)
-      const section = accountSection(store, provider)
-      if (section === undefined || !Object.hasOwn(section, account)) return
-      const rest = { ...section }
-      delete rest[account]
-      store.accounts = { ...store.accounts as Record<string, unknown>, [provider]: rest }
-      await writeCatalogFile(store, path)
+      await updateCatalogFile(path, store => {
+        const section = accountSection(store, provider)
+        if (section === undefined || !Object.hasOwn(section, account)) return false
+        const rest = { ...section }
+        delete rest[account]
+        store.accounts = { ...store.accounts as Record<string, unknown>, [provider]: rest }
+        return true
+      })
     },
   }
 }

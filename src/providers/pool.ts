@@ -262,10 +262,13 @@ export class PoolAdapter extends LlmAdapter {
     const candidates = await withAbortSignal(() => this.select(options.model, members, options.sessionId), options.signal)
     if (candidates.length === 0) throw this.exhausted(options.model, members)
     const failures = new Map<ConcretePoolMember, LlmError>()
+    let last: ConcretePoolMember | undefined
+    let tried = 0
     for (const member of candidates) {
       options.signal?.throwIfAborted()
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
+      tried += 1
       const iterator = streamAccountWithReplay(
         adapter, { ...options, provider: member.provider }, member.account, member.model,
       )[Symbol.asyncIterator]()
@@ -310,9 +313,13 @@ export class PoolAdapter extends LlmAdapter {
         }
         this.options.onWarn(
           `pool "${options.model}": ${memberLabel(member)} failed before any output`
-          + ` (${error instanceof Error ? error.message : String(error)}); trying the next member`,
+          + ` (${describeFailure(error)}); trying the next member`,
         )
-        if (error instanceof LlmError) failures.set(member, error)
+        failures.set(member, error instanceof LlmError
+          ? error
+          : new LlmError(describeFailure(error), 'TRANSPORT', { cause: error }))
+        last = member
+        continue
         continue
       }
       this.remember(options.model, options.sessionId, member)
@@ -337,7 +344,7 @@ export class PoolAdapter extends LlmAdapter {
       }
       return
     }
-    throw this.exhausted(options.model, members, failures)
+    throw this.exhausted(options.model, members, failures, last, tried)
   }
 
   /**
@@ -397,34 +404,102 @@ export class PoolAdapter extends LlmAdapter {
     this.sticky.set(key, memberKey(member.provider, member.account, member.model))
   }
 
-  /** Preserve real failures, including when every member was skipped by health. */
-  private exhausted(model: string, pool: ConcretePoolMember[], failures = new Map<ConcretePoolMember, LlmError>()): LlmError {
+  /**
+   * The error for an exhausted pool. It says WHY (issue #139) and carries the
+   * real failure's own code, never a synthetic `RATE_LIMIT`: a member failure
+   * of this request, or the health record (with the failure that parked it)
+   * that kept a member out of the candidate set. A member is blocked until
+   * both its member and account cooldowns expire; the recovery hint is scoped
+   * to THIS pool's members (the health registry is shared across pools).
+   *
+   * A transiently failed member is preferred over another account's terminal
+   * quota/auth failure so the retry path stays visible; only when every
+   * account is out of quota is the task told to stop.
+   */
+  private exhausted(
+    model: string,
+    pool: ConcretePoolMember[],
+    failures = new Map<ConcretePoolMember, LlmError>(),
+    last?: ConcretePoolMember,
+    tried = 0,
+  ): LlmError {
     const now = Date.now()
     const reasons = pool.flatMap(member => {
       const blocker = this.options.health.memberBlocker(member.provider, member.account, member.model, now)
       const failure = blocker?.failure ?? failures.get(member)
         ?? (blocker === undefined ? undefined : new LlmError(`account unavailable (${blocker.reason})`, blocker.reason))
-      return failure === undefined ? [] : [{ failure, retryAfterMs: blocker === undefined
-        ? failure.failure.providerRetryAfterMs : Math.max(1, blocker.unavailableUntil - now) }]
+      if (failure === undefined) return []
+      return [{
+        member,
+        failure,
+        // A synthesized record names only the code that parked the member.
+        detail: blocker !== undefined && blocker.failure === undefined && !failures.has(member)
+          ? blocker.reason
+          : describeFailure(failure),
+        key: blocker?.key ?? memberLabel(member),
+        retryAfterMs: blocker === undefined
+          ? failure.failure.providerRetryAfterMs
+          : Math.max(1, blocker.unavailableUntil - now),
+      }]
     })
-    // A transiently failed member can recover without quota/auth intervention.
-    // Do not let a different account's terminal quota hide that retry path.
-    const retryable = reasons.filter(({ failure }) => ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', EMPTY_RESPONSE_CODE].includes(failure.code))
+    const retryable = reasons.filter(({ failure }) => TRANSIENT_CODES.has(failure.code))
     const choices = retryable.length > 0 ? retryable : reasons
+    // The hint is the earliest recovery among the choices (none, when one of
+    // them can be retried at once); the cause is the member tried last when
+    // it is among them, else the earliest-recovering one.
     choices.sort((a, b) => (a.retryAfterMs ?? 0) - (b.retryAfterMs ?? 0))
-    const selected = choices[0]
-    if (selected === undefined) return new LlmError(`pool "${model}": no logged-in account is available`, 'MISSING_CREDENTIAL')
-    const { failure, retryAfterMs } = selected
+    const earliest = choices[0]
+    const selected = choices.find(choice => choice.member === last) ?? earliest
+    if (selected === undefined || earliest === undefined) {
+      const message = `pool "${model}" exhausted: no logged-in account is available`
+      this.options.onWarn(message)
+      return new LlmError(message, 'MISSING_CREDENTIAL')
+    }
+    const { failure } = selected
+    const { retryAfterMs } = earliest
+    const recovers = retryAfterMs === undefined ? undefined : formatDuration(retryAfterMs)
+    let message = tried > 0
+      ? `pool "${model}" exhausted: ${tried} of ${pool.length} member(s) failed;`
+        + ` ${selected.member === last ? 'last ' : ''}${memberLabel(selected.member)} (${selected.detail})`
+        + (recovers === undefined ? '' : `; earliest member recovers in ${recovers}`)
+      : `pool "${model}" exhausted: every member is cooling down;`
+        + ` ${selected.key} (${selected.detail})`
+        + (recovers === undefined ? '' : ` recovers in ${recovers}`)
     const allQuota = reasons.length === pool.length && reasons.every(item => item.failure.code === QUOTA_EXCEEDED_CODE)
-    const summary = allQuota
-      ? 'subscription quota exhausted for all available accounts; task stopped until quota resets or another account is added'
-      : 'no account could complete this request'
-    return new LlmError(`pool "${model}": ${summary}. ${failure.message}`, failure.code, {
-      ...failure.failure,
+    if (allQuota) {
+      message += '; subscription quota exhausted for all available accounts;'
+        + ' task stopped until quota resets or another account is added'
+    }
+    this.options.onWarn(message)
+    // The pool-wide hint replaces the member's own: a member that can be
+    // retried at once must not inherit another member's wait.
+    const { providerRetryAfterMs: _memberHint, ...detail } = failure.failure
+    return new LlmError(message, failure.code, {
+      ...detail,
       ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
       cause: failure,
     })
   }
+}
+
+/** Failure codes a member recovers from without quota or credential intervention. */
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', EMPTY_RESPONSE_CODE])
+
+/** `CODE: message` for an LlmError, the message alone otherwise. */
+function describeFailure(error: unknown): string {
+  if (error instanceof LlmError) return `${error.code}: ${error.message}`
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Compact human duration (`42s`, `4m12s`, `35h00m`). */
+function formatDuration(ms: number): string {
+  const total = Math.max(1, Math.round(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, '0')}m`
+  if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, '0')}s`
+  return `${seconds}s`
 }
 
 function stickyKey(poolId: string, sessionId: NonNullable<GenerateOptions['sessionId']>): string {

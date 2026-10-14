@@ -64,6 +64,30 @@ export const CACHE_CONTROL_1H = { type: 'ephemeral', ttl: '1h' } as const
  */
 export const TRAILING_USER_PLACEHOLDER = 'Continue.'
 
+/**
+ * How long Anthropic keeps a conversation cache entry after its last use:
+ * five minutes (the API default) or one hour. The tools+system prefix is
+ * always pinned at one hour ({@link CACHE_CONTROL_1H}), as Claude Code does;
+ * this TTL applies to the conversation marks only. A one-hour entry is written at twice the base
+ * input price instead of 1.25×, and reads cost the same either way.
+ */
+export type PromptCacheTtl = '5m' | '1h'
+
+/** The API default; a marker at this TTL carries no `ttl` field at all. */
+export const DEFAULT_PROMPT_CACHE_TTL: PromptCacheTtl = '5m'
+
+/**
+ * Build one `cache_control` marker.
+ *
+ * Five minutes is spelled by omitting `ttl`, so a request that does not opt in
+ * stays byte-identical to what earlier releases sent.
+ * @param ttl - cache lifetime; defaults to five minutes.
+ * @returns a fresh marker object (callers attach it to one block each).
+ */
+export function cacheControl(ttl: PromptCacheTtl = DEFAULT_PROMPT_CACHE_TTL): Record<string, unknown> {
+  return ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+}
+
 /** One Anthropic request message. */
 export interface AnthropicMessage {
   role: 'user' | 'assistant'
@@ -419,17 +443,24 @@ function unknownToolOutcome(id: string): Record<string, unknown> {
  * Marks are counted across the flattened block sequence, not per message,
  * because the lookback window Anthropic walks counts blocks the same way.
  * @param messages - assembled Anthropic messages, marked in place.
+ * @param ttl - cache lifetime for every mark; defaults to five minutes. The
+ * tools+system anchor is always 1h, so a 5m or 1h mark here never follows a
+ * shorter one (Anthropic rejects a 1h breakpoint behind a 5m one).
  * @param marks - breakpoints to place; defaults to {@link
  * MESSAGE_CACHE_BREAKPOINTS}, the budget left for the history once the system
  * and tool anchors are placed (Anthropic allows four markers per request).
  */
-export function markMessageCache(messages: readonly AnthropicMessage[], marks = MESSAGE_CACHE_BREAKPOINTS): void {
+export function markMessageCache(
+  messages: readonly AnthropicMessage[],
+  ttl?: PromptCacheTtl,
+  marks = MESSAGE_CACHE_BREAKPOINTS,
+): void {
   // Replayed thinking blocks refuse cache_control; the marks skip over them.
   const blocks = messages.flatMap(message => message.content).filter(block => !isThinkingBlock(block))
   for (let mark = 0; mark < marks; mark++) {
     const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
     if (at < 0) return
-    blocks[at].cache_control = { type: 'ephemeral' }
+    blocks[at].cache_control = cacheControl(ttl)
   }
 }
 
@@ -441,7 +472,10 @@ export function markMessageCache(messages: readonly AnthropicMessage[], marks = 
  * conversation is appended, and a later one is left to {@link toAnthropicMessages}.
  * @returns the system content blocks.
  */
-export function toAnthropicSystem(system?: string, messages?: readonly TranslatableMessage[]): Record<string, unknown>[] {
+export function toAnthropicSystem(
+  system?: string,
+  messages?: readonly TranslatableMessage[],
+): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY }]
   if (system !== undefined && system.length > 0) blocks.push({ type: 'text', text: system })
   const history = messages ?? []

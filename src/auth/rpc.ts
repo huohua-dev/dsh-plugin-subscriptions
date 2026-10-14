@@ -38,7 +38,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'providerSettings', 'setProviderSettings',
   'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
-  'image', 'video',
+  'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
@@ -97,6 +97,7 @@ export interface AccountStatus {
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+  displayName?: string
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
   /** Logged-in accounts, default first. */
@@ -151,6 +152,8 @@ export interface ProviderAccountCatalog {
 
 /** Provider and account preference operations behind providerSettings/setProviderSettings. */
 export interface ProviderSettingsController {
+  /** Local preferences only: status must not fetch a model catalog. */
+  displayName?(provider: ProviderId): string | undefined
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -164,6 +167,8 @@ export interface ModelDefaultsController {
 
 /** Provider-agnostic auth operations the RPC handler delegates to. */
 export interface AuthController {
+  prepareReset?(account: string, signal: AbortSignal): Promise<unknown>
+  consumeReset?(account: string, ticket: string, signal: AbortSignal): Promise<void>
   /** Current status of one provider. */
   status(provider: ProviderId): Promise<ProviderStatus>
   /**
@@ -541,7 +546,10 @@ async function dispatch(
           detail: error instanceof Error ? error.message : String(error),
         }) satisfies ProviderStatus)] as const,
       ))
-      return ok({ providers: Object.fromEntries(entries) })
+      return ok({ providers: Object.fromEntries(entries.map(([provider, status]) => {
+        const displayName = providerSettings?.displayName?.(provider)
+        return [provider, { ...status, ...(displayName ? { displayName } : {}) }]
+      })) })
     }
     case 'login': {
       const provider = readProvider(payload)
@@ -569,6 +577,13 @@ async function dispatch(
       const provider = readProvider(payload)
       return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload)))
     }
+    case 'prepareReset':
+      if (!controller.prepareReset) throw new BadRequest('Reset redemption unavailable')
+      return ok(await controller.prepareReset(readString(payload, 'account'), signal))
+    case 'consumeReset':
+      if (!controller.consumeReset) throw new BadRequest('Reset redemption unavailable')
+      await controller.consumeReset(readString(payload, 'account'), readString(payload, 'ticket'), signal)
+      return ok({ ok: true })
     case 'image':
       return ok(await controller.readImage(readImageRef(payload), signal))
     case 'video':

@@ -48,11 +48,7 @@ export interface ProviderModelEditorHandle {
   collect(): ModelDraft | undefined
 }
 
-const border = '1px solid var(--dsw-alias-border-l2, #ddd)'
-const control: CSSProperties = {
-  font: 'inherit', color: 'inherit', background: 'transparent', border,
-  borderRadius: 8, padding: '6px 10px', minWidth: 0,
-}
+const border = '0.5px solid var(--dsw-alias-border-l2, #ddd)'
 const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
 
 /**
@@ -126,16 +122,24 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
 
   const allModels = catalog?.models ?? []
   const known = new Set(allModels.map(model => model.id))
-  const missing = (draft.visibleModels ?? []).filter(id => !known.has(id)).map(id => ({ id, name: id } as ModelRow))
-  const models = [...allModels, ...missing].filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const savedIds = new Set([...(draft.visibleModels ?? []), ...Object.keys(draft.modelDisplayNames ?? {})])
+  const missing = [...savedIds].filter(id => !known.has(id)).map(id => ({ id, name: id } as ModelRow))
+  const customName = (id: string) => Object.hasOwn(draft.modelDisplayNames ?? {}, id) ? draft.modelDisplayNames![id] : ''
+  const editName = (id: string, value: string) => {
+    const names: Record<string, string> = Object.assign(Object.create(null), draft.modelDisplayNames)
+    if (value.trim()) names[id] = value
+    else delete names[id]
+    edit({ ...draft, modelDisplayNames: names })
+  }
+  const models = [...allModels, ...missing].filter(model => `${model.name} ${model.id} ${customName(model.id)}`.toLowerCase().includes(query.trim().toLowerCase()))
   const selected = new Set(draft.visibleModels ?? allModels.map(model => model.id))
   return <div style={{ borderTop: border, marginTop: 12, paddingTop: 12 }}>
-    <h3 style={{ margin: 0, fontSize: 15 }}>{t('modelsEdit')}</h3>
+    <h3 style={{ margin: 0 }}>{t('modelsEdit')}</h3>
     <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
-      <p style={{ margin: 0 }}>{t('modelsHint')}</p>
-      {error && <p role="alert" style={{ margin: 0, color: 'var(--dsw-alias-state-error-primary, #b42318)' }}>{error}</p>}
+      <p className="dsh-subscription-hint">{t('modelsHint')}</p>
+      {error && <p role="alert">{error}</p>}
       <div style={actions}>
-        <button type="button" style={control} disabled={busy || disabled || dirty} onClick={() => { void load(true) }}>{t('usageRefresh')}</button>
+        <button type="button" className="dsh-subscription-quiet" disabled={busy || disabled || dirty} onClick={() => { void load(true) }}>{t('usageRefresh')}</button>
         {busy && <span role="status">{t('modelDefaultsLoading')}</span>}
       </div>
       {catalog && <fieldset disabled={busy || disabled} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'grid', gap: 12 }}>
@@ -146,10 +150,10 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
           edit(next)
         }} /> {t('modelsAutomatic')}</label>
         <div style={actions}>
-          <input style={{ ...control, flex: '1 1 180px' }} value={query} onChange={event => setQuery(event.target.value)}
+          <input style={{ flex: '1 1 180px' }} value={query} onChange={event => setQuery(event.target.value)}
             placeholder={t('modelDefaultsFilterPlaceholder')} aria-label={t('modelDefaultsFilterPlaceholder')} />
-          <button type="button" style={control} onClick={() => edit({ ...draft, visibleModels: allModels.map(model => model.id) })}>{t('modelsSelectAll')}</button>
-          <button type="button" style={control} onClick={() => edit({ ...draft, visibleModels: [] })}>{t('modelsSelectNone')}</button>
+          <button type="button" onClick={() => edit({ ...draft, visibleModels: allModels.map(model => model.id) })}>{t('modelsSelectAll')}</button>
+          <button type="button" onClick={() => edit({ ...draft, visibleModels: [] })}>{t('modelsSelectNone')}</button>
         </div>
         <div style={{ maxHeight: 360, overflowY: 'auto', display: 'grid', gap: 8 }}>
           {models.map(model => <div key={model.id} style={{ borderBottom: border, padding: '8px 2px', display: 'grid', gap: 8 }}>
@@ -158,9 +162,22 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
               if (event.target.checked) next.add(model.id); else next.delete(model.id)
               edit({ ...draft, visibleModels: [...next] })
             }} /> {model.name}{!known.has(model.id) && ` (${t('modelsUnavailable')})`}</label>
+            <small style={{ color: 'var(--dsw-alias-label-tertiary)', overflowWrap: 'anywhere' }}>ID: {model.id}</small>
+            <div style={actions}>
+              <label style={{ display: 'grid', gap: 6, flex: '1 1 200px', minWidth: 0 }}>
+                <span style={{ fontSize: 12 }}>{t('modelDisplayName')}</span>
+                <input maxLength={80} aria-label={`${model.name} ${t('modelDisplayName')}`}
+                  placeholder={model.name} value={customName(model.id)}
+                  onChange={event => editName(model.id, event.target.value)} />
+              </label>
+              <button type="button" style={{ alignSelf: 'end' }}
+                aria-label={`${model.name} ${t('displayNameReset')}`} disabled={!customName(model.id)}
+                onClick={() => editName(model.id, '')}>{t('displayNameReset')}</button>
+            </div>
+            <small style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{t('modelDisplayNameHint')}</small>
             <div style={actions}>
             {(model.efforts?.length ?? 0) > 0 && <label style={actions}>{t('modelDefaultsTitle')}
-              <select style={control} aria-label={`${model.name} ${t('modelDefaultsTitle')}`}
+              <select aria-label={`${model.name} ${t('modelDefaultsTitle')}`}
                 value={efforts[model.id] ?? ''} onChange={event => {
                   setEfforts({ ...efforts, [model.id]: event.target.value }); setDirty(true)
                 }}>
@@ -172,7 +189,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
             </label>}
             {provider === 'codex' && model.maxContextWindow !== undefined && <div style={actions}>
               <label style={actions}>{t('modelsContext')}
-                <input style={{ ...control, width: 140 }} inputMode="numeric" value={contexts[model.id] ?? ''}
+                <input style={{ width: 140 }} inputMode="numeric" value={contexts[model.id] ?? ''}
                   aria-label={`${model.name} ${t('modelsContext')}`} placeholder={String(model.defaultContextWindow)}
                   onChange={event => { setContexts({ ...contexts, [model.id]: event.target.value }); setDirty(true) }} />
               </label>

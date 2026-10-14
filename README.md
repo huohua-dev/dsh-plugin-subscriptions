@@ -4,6 +4,12 @@ English | [中文](README.zh.md)
 
 Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
 
+## Subscription and model display names
+
+Open **Settings → Subscriptions → Manage** to set a subscription display name, or edit a model's display name under **Edit model list**. Both share the existing Save/Cancel actions; clearing a name or choosing Reset to default and saving restores the original name. Names are single-line text of up to 80 characters, stored per provider and model ID in `provider-settings.json`, and survive restarts and catalog refreshes. They only change presentation: provider IDs, model IDs, reasoning settings, and account routing remain unchanged. Existing account aliases continue to work independently.
+
+Subscription display names also label provider groups in the native model picker. Saving a cleared name restores the provider's default group title.
+
 ## Demo
 
 Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):
@@ -90,7 +96,9 @@ Open **Settings → Subscriptions → provider → Manage** to edit account alia
 
 ### Refreshing model lists
 
-In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to bypass the five-minute catalog cache and refresh the conversation model picker too. This is separate from refreshing subscription usage. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery.
+The model picker uses saved catalogs immediately, including catalogs for non-default accounts, without waiting for network discovery or starting a refresh on each open or selection. The plugin checks catalogs at startup, skips snapshots fetched within the last five minutes, then checks again 60 minutes after the previous check finishes. Failed checks retain saved models and wait for the next scheduled check. An account without any saved catalog still waits for its first discovery.
+
+In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to fetch the current catalog immediately and update the conversation model picker. Successful background updates also invalidate the picker cache. This is separate from subscription-usage and credential refresh, whose behavior is unchanged. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery.
 
 Codex catalog visibility depends on the `client_version` request parameter. By default the plugin reads the stable version from the official npm `@openai/codex` package's public metadata (no CLI installation or subscription credentials sent to npm). Successful lookups are cached in memory for six hours; failures retry after five minutes and retain the last successful version, or the verified `0.153.4` fallback on first use. The lookup has a 5-second deadline, shares in-flight work across accounts, and ignores prerelease or regressed versions. On load the plugin also raises Node's Happy Eyeballs per-address connect attempt timeout to at least 1.5 seconds (never lowering a larger host value), because the 250ms default drops every connection on links where one TCP handshake takes longer than that. Manual model-list refresh also rechecks the version. An explicit plugin configuration field, `codexClientVersion: '0.153.4'`, takes precedence and disables automatic lookup; restart DSH after changing it. Model availability remains account-dependent; see [verification notes](docs/codex-catalog-refresh.md).
 
@@ -159,7 +167,7 @@ Codex models also accept a context budget in tokens. The plugin reads each accou
 
 The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
 
-Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of the five-minute discovery cache. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
+Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of model-catalog refresh. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
 
 ### Reasoning defaults in the model editor
 
@@ -175,6 +183,7 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
   config:
     providers: [codex, claude]        # subset; default all five
     streamIdleTimeoutMs: 300000
+    claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
     rateLimit:
       wait: false                      # default: no hours-long rate-limit waits
       maxWaitMs: 21600000              # opt-in wait ceiling; QUOTA never auto-retries
@@ -184,6 +193,27 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
       copilot:                         # manual entries disable Copilot catalog discovery
         - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
 ```
+
+`claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
+It can also be changed without a restart from Settings → Subscriptions → Claude → Manage ("Prompt cache
+lifetime"); that choice is stored in `provider-settings.json`, overrides the config value, and applies
+from the next turn. The tools+system prefix breakpoint is always sent with `ttl: "1h"`, the way Claude Code
+pins it; this setting controls the conversation breakpoints. The default, `5m`, leaves them without a `ttl`
+field; `1h` marks them with `ttl: "1h"` too. Because the prefix anchor comes first, a request never puts a
+one-hour breakpoint after a five-minute one, which Anthropic rejects.
+Cache reads have the same price for either TTL, but a one-hour *write* is priced at 2×
+the base input price instead of 1.25×. One hour may pay off when you often pause for 5–60 minutes
+between messages and can reuse the prefix; the benefit depends on the workload and does not establish
+subscription quota savings. With frequent reuse inside five minutes, the higher write price may not pay off.
+Claude Code itself requests the one-hour TTL for the main conversation on a subscription; see
+[Claude Code's prompt-caching notes](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets).
+Changing the setting on an already-cached conversation may cause one prefix rewrite: with a conversation-tail
+breakpoint, the first one-hour request after five-minute writes rewrote the prefix in testing, while a
+system-only breakpoint could hit. A five-minute request can read a one-hour entry, but a one-hour-marked
+read does not upgrade a five-minute entry's lifetime. Compaction and session-title requests stay on five
+minutes to preserve their existing auxiliary-request behavior. Requests from subagents carry no marker the plugin can see, so they follow the setting
+along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
+Copilot and Antigravity use their own caching.
 
 `wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
 entries keep working without it — the field exists because a configured model the live

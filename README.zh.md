@@ -4,6 +4,12 @@
 
 把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot** 和 **Google Antigravity** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
 
+## 订阅与模型显示名
+
+在 **设置 → 订阅 → 管理** 顶部修改订阅显示名，在 **编辑模型列表** 中修改模型显示名；使用同一组保存／取消按钮，留空或恢复默认后保存可恢复原名。名称按服务商和模型 ID 存储在原有 `provider-settings.json`，跨重启和目录刷新保留。名称为最多 80 字符的单行文本，仅改变显示，不改变 provider、模型 ID、推理参数或账号路由；现有账号别名可继续独立使用。
+
+订阅显示名也用于原生模型选择器的服务商分组标题；清空显示名并保存后，分组恢复为服务商默认名称。
+
 ## 演示
 
 设置 → **订阅**:每个 provider 的登录/退出,无需 API key。Claude 有 Claude Code 会话时导入凭据,否则和 Codex、Grok 一样走 OAuth(以下设置截图使用演示账号与目录数据):
@@ -89,7 +95,9 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### 刷新模型列表
 
-在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中点击 **刷新**，可绕过五分钟目录缓存，并通知会话模型选择器重新读取。这与刷新订阅用量是两个独立操作。如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。
+模型选择器优先使用已保存的目录，包括非默认账号的目录；打开或切换已缓存模型时，不等待在线发现，也不会因此发起刷新。插件启动时检查目录，跳过五分钟内已更新的快照；本轮检查结束后，隔 60 分钟再检查。检查失败时保留已有目录，等待下一轮自动检查。没有任何目录缓存的账号，首次仍需等待在线发现。
+
+在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中点击 **刷新**，可立即获取最新目录并更新会话模型选择器。后台刷新成功后也会通知选择器重新读取。这与订阅用量、凭据刷新是独立机制，后二者行为保持不变。如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。
 
 Codex 的目录可见性受请求中的 `client_version` 影响。默认自动读取 npm 官方 `@openai/codex` 包公开元数据中的稳定版本，不安装 CLI，也不向 npm 发送订阅登录凭据。查询成功后在内存缓存六小时；失败后五分钟再试，保留上次成功版本，首次失败则回退到已验证的 `0.153.4`。查询最多等待 5 秒，多账号共用查询，忽略预发布版和低于当前已知版本的结果。插件加载时还会把 Node 的 Happy Eyeballs 单地址建连尝试超时提高到至少 1.5 秒（不会降低宿主已设的更大值），因为默认 250ms 在一次 TCP 握手就超过该值的高延迟链路上会让所有连接失败。手动刷新模型列表也会重新检查版本。显式配置 `codexClientVersion: '0.153.4'` 时优先使用该值，并关闭自动查询；更改配置后需重启 DSH。模型仍以账号实际权限为准，详见[验证记录](docs/codex-catalog-refresh.md)。
 
@@ -158,7 +166,7 @@ Codex 模型还可填写上下文 token 数。插件读取每个账号的 `conte
 
 同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
 
-设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受五分钟模型发现缓存过期影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
+设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受模型目录刷新影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
 
 ### 编辑模型的默认推理档
 
@@ -174,6 +182,7 @@ Codex 模型还可填写上下文 token 数。插件读取每个账号的 `conte
   config:
     providers: [codex, claude]        # 子集;默认五个全启用
     streamIdleTimeoutMs: 300000
+    claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)
       maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
@@ -183,6 +192,21 @@ Codex 模型还可填写上下文 token 数。插件读取每个账号的 `conte
       copilot:                         # 手工条目会关闭 Copilot 目录发现
         - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`claudePromptCacheTtl` 决定 Anthropic 在最近一次使用之后保留 Claude 对话缓存多久。工具+系统提示前缀的
+缓存断点始终带 `ttl: "1h"`（与 Claude Code 一致），此设置只控制对话中的缓存断点：默认 `5m` 不带 `ttl`
+字段，设为 `1h` 时也带上 `ttl: "1h"`。前缀断点排在最前，因此不会出现 Anthropic 拒绝的"5 分钟断点之后
+跟 1 小时断点"的顺序。缓存读取
+无论哪档价格相同；区别在于 1 小时档的*写入*按基础输入价的 2 倍定价，而不是 1.25 倍。
+如果你经常在两条消息之间停顿 5–60 分钟且能复用前缀，`1h` 可能更划算；收益取决于工作负载，不能据此
+保证订阅额度节省。如果经常在 5 分钟内复用缓存，更高的写入价格可能无法回本。Claude Code 自己在订阅下
+对主对话默认请求 1 小时，见
+[Claude Code 的提示缓存说明](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets)。
+在已有缓存的对话上修改该设置可能产生一次前缀重写：带对话尾部缓存点的测试中，5 分钟写入之后的第一个
+1 小时请求重写了前缀，但只使用系统缓存点时可以命中。5 分钟请求可以读取 1 小时条目；用 1 小时标记读取
+旧的 5 分钟条目不会升级其生命周期。压缩（compaction）和会话标题请求保留原有辅助请求行为，仍使用 5 分钟。子代理
+（subagent）的请求没有插件可见的标记，因此与主对话一样遵循该设置。修改后需重启 DSH 生效，且只影响
+Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
 
 `wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
 工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而

@@ -20,6 +20,7 @@ import {
   AnthropicStreamTranslator,
   CLAUDE_CODE_IDENTITY,
   CLAUDE_UNKNOWN_TOOL_OUTCOME,
+  cacheControl,
   markMessageCache,
   reconcileAnthropicToolPairs,
   toAnthropicMessages,
@@ -651,6 +652,29 @@ test('markMessageCache marks a tool_result block when the turn ends on one', () 
   assert.deepEqual(content[1].cache_control, { type: 'ephemeral' })
 })
 
+test('cacheControl spells five minutes by omitting ttl, and one hour explicitly', () => {
+  assert.deepEqual(cacheControl(), { type: 'ephemeral' })
+  assert.deepEqual(cacheControl('5m'), { type: 'ephemeral' })
+  assert.deepEqual(cacheControl('1h'), { type: 'ephemeral', ttl: '1h' })
+  assert.notEqual(cacheControl('1h'), cacheControl('1h'), 'every mark is its own object')
+})
+
+test('markMessageCache applies one TTL to every conversation mark; the system anchor stays 1h', () => {
+  const content: Record<string, unknown>[] = Array.from(
+    { length: 40 },
+    (_, index) => ({ type: 'text', text: `b${index}` }),
+  )
+  markMessageCache([{ role: 'user', content }], '1h')
+  const marked = content.filter(block => 'cache_control' in block)
+  assert.equal(marked.length, 3)
+  for (const block of marked) assert.deepEqual(block.cache_control, { type: 'ephemeral', ttl: '1h' })
+
+  assert.deepEqual(toAnthropicSystem('explicit'), [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY },
+    { type: 'text', text: 'explicit', cache_control: { type: 'ephemeral', ttl: '1h' } },
+  ])
+})
+
 test('toAnthropicTools maps to input_schema tools and anchors the last one', () => {
   assert.deepEqual(toAnthropicTools([{ name: 'bash', description: 'run', parameters: { type: 'object' } }]), [
     { name: 'bash', description: 'run', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral', ttl: '1h' } },
@@ -839,7 +863,7 @@ test('markMessageCache never marks a thinking block', () => {
   const messages: AnthropicMessage[] = [
     { role: 'assistant', content: [{ type: 'text', text: 'a' }, { type: 'thinking', thinking: 't', signature: 's' }] },
   ]
-  markMessageCache(messages, 1)
+  markMessageCache(messages, undefined, 1)
   assert.equal(messages[0].content[1].cache_control, undefined)
   assert.deepEqual(messages[0].content[0].cache_control, { type: 'ephemeral' })
 })

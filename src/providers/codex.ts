@@ -300,6 +300,74 @@ export function isCodexPermanentRefreshError(error: unknown): boolean {
 }
 
 export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
+export const CODEX_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
+
+/** One banked reset credit returned by the private ChatGPT backend (subset). */
+interface CodexResetCredit {
+  id?: unknown
+  reset_type?: unknown
+  status?: unknown
+  granted_at?: unknown
+  expires_at?: unknown
+}
+
+function parseResetDate(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : undefined
+}
+
+/** Read available banked resets. This endpoint is private and intentionally read-only. */
+export async function fetchCodexResetCredits(
+  session: CodexSession,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<NonNullable<ProviderUsage['resetCredits']>> {
+  const response = await fetchFn(CODEX_RESET_CREDITS_URL, {
+    headers: {
+      authorization: `Bearer ${session.accessToken}`,
+      'chatgpt-account-id': session.accountId,
+      originator: 'Codex Desktop',
+      'openai-beta': 'codex-1',
+      accept: 'application/json',
+      ...attributionHeaders(),
+    },
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await oauthEndpointError(response, 'codex reset credits')
+  const payload = await response.json() as { credits?: unknown }
+  if (!Array.isArray(payload?.credits)) throw new Error('codex reset credits: unexpected response (missing credits array)')
+  return payload.credits.flatMap((value): NonNullable<ProviderUsage['resetCredits']> => {
+    if (typeof value !== 'object' || value === null) return []
+    const credit = value as CodexResetCredit
+    if (credit.status !== 'available' || credit.reset_type !== 'codex_rate_limits') return []
+    const grantedAt = parseResetDate(credit.granted_at)
+    const expiresAt = parseResetDate(credit.expires_at)
+    return [{ ...(typeof credit.id === 'string' ? { id: credit.id } : {}), ...(grantedAt === undefined ? {} : { grantedAt }), ...(expiresAt === undefined ? {} : { expiresAt }) }]
+  })
+}
+
+/** Spend one banked reset. The caller must already have confirmed the credit is still available. */
+export async function consumeCodexResetCredit(
+  session: CodexSession, creditId: string, requestId: string,
+  fetchFn: FetchFn = proxiedFetch, signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetchFn(CODEX_RESET_CREDITS_URL + '/consume', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer ' + session.accessToken,
+      'chatgpt-account-id': session.accountId,
+      originator: 'Codex Desktop', 'openai-beta': 'codex-1',
+      'content-type': 'application/json', accept: 'application/json',
+      ...attributionHeaders(),
+    },
+    body: JSON.stringify({ redeem_request_id: requestId, credit_id: creditId }),
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await oauthEndpointError(response, 'codex consume reset')
+  const payload = await response.json() as { code?: unknown }
+  if (payload?.code !== 'reset') throw new Error('Reset was not confirmed. Verify the account in Codex before retrying.')
+}
 
 /** One `rate_limit.*_window` object of the wham/usage payload (subset). */
 interface CodexUsageWindow {
@@ -492,8 +560,10 @@ export async function fetchCodexModels(
     // codex-rs ModelVisibility: only "list" is picker-visible; hide/none are
     // dropped, and an absent or unknown value is included (in doubt, include).
     if (entry.visibility === 'hide' || entry.visibility === 'none') continue
+    // "ultra" is a Codex-client mode (max reasoning + automatic sub-agent
+    // delegation), not a wire value: the Responses API rejects it with HTTP 400.
     const efforts = (entry.supported_reasoning_levels ?? [])
-      .filter(level => typeof level.effort === 'string' && level.effort.length > 0)
+      .filter(level => typeof level.effort === 'string' && level.effort.length > 0 && level.effort !== 'ultra')
       .map(level => ({
         id: ReasoningEffortId(level.effort as string),
         name: effortDisplayName(level.effort as string),
@@ -558,6 +628,7 @@ export interface CodexAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  onCatalogChanged?: () => void
   /** Durable store for one NON-default account's catalog (the default's lives in `catalogStore`). */
   accountCatalogStore?: (account: string) => CatalogPersistence
   /** Per-account catalog bound for the picker union (defaults to {@link DISCOVERY_TIMEOUT_MS}). */
@@ -665,6 +736,17 @@ export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input'
 }
 
 /**
+ * The `reasoning.effort` wire value for a selected effort. Codex's "ultra" is
+ * a client-side selection (max reasoning plus proactive sub-agent delegation)
+ * that the Codex CLI itself lowers to `max` at the Responses API boundary;
+ * the backend answers HTTP 400 to a literal `ultra`. Discovery no longer
+ * lists it, but an effort saved before that change may still arrive here.
+ */
+export function codexWireEffort(effort: string): string {
+  return effort === 'ultra' ? 'max' : effort
+}
+
+/**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
  * `service_tier: priority`; the tier field is omitted entirely otherwise,
@@ -686,7 +768,7 @@ export function codexRequestBody(
       ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto', parallel_tool_calls: true }
       : {},
     ...options.reasoningEffort !== undefined
-      ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
+      ? { reasoning: { effort: codexWireEffort(String(options.reasoningEffort)), summary: 'auto' } }
       : {},
     store: false,
     stream: true,
@@ -723,13 +805,15 @@ export class CodexAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  private accountCatalogsInvalidated = false
+  private readonly invalidatedAccounts = new Set<string>()
   /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
   private catalogOwner: string | undefined
 
   constructor(private readonly options: CodexAdapterOptions) {
     super()
     codexClientVersion(options.clientVersion)
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalog = new ModelCatalogCache(options.catalogStore, undefined, options.onCatalogChanged)
   }
 
   /** Discovery fetcher: resolves the session through the refresh-aware path. */
@@ -741,6 +825,8 @@ export class CodexAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
+    if (account === undefined) { this.accountCatalogsInvalidated = true; this.invalidatedAccounts.clear() }
+    else this.invalidatedAccounts.add(account)
     // invalidate() also drops the persisted snapshot, so a logged-out account
     // cannot resurface its models from disk.
     if (account === undefined) {
@@ -756,7 +842,7 @@ export class CodexAdapter extends LlmAdapter {
     }
   }
 
-  /** Persisted cache for the default account; a throwaway cache for any other. */
+  /** Default and secondary accounts each seed their own persisted catalog. */
   private async catalogFor(account?: string): Promise<ModelCatalogCache> {
     const defaultKey = await this.options.tokens.defaultAccount()
     const key = account ?? defaultKey
@@ -769,7 +855,9 @@ export class CodexAdapter extends LlmAdapter {
     }
     let cache = this.accountCatalogs.get(key)
     if (cache === undefined) {
-      cache = new ModelCatalogCache(this.options.accountCatalogStore?.(key))
+      cache = new ModelCatalogCache(this.options.accountCatalogStore?.(key), undefined, this.options.onCatalogChanged)
+      const invalidated = this.invalidatedAccounts.delete(key)
+      if (this.accountCatalogsInvalidated || invalidated) cache.invalidate()
       this.accountCatalogs.set(key, cache)
     }
     return cache
@@ -820,7 +908,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
+    const own = await this.listOwnModels(provider, undefined, undefined, true)
     const pool = this.options.pool?.()
     if (pool === undefined) return own
     const extra = await pool.modelsForProvider(provider as ProviderId)
@@ -830,13 +918,13 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached = false): Promise<readonly LlmModelInfo[]> {
     if (account === undefined) {
       const accounts = (await this.options.tokens.list()).map(entry => entry.key)
       if (accounts.length === 0) return []
       return unionAccountCatalogs(
         accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal, preferCached),
         { timeoutMs: this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
       )
     }
@@ -849,11 +937,11 @@ export class CodexAdapter extends LlmAdapter {
       // The fetcher runs only on a cache miss, and resolves the session
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
-      const discovered = await discoverOrRetryAuth(
+      const discovered = await catalog.get(() => discoverOrRetryAuth(
         force => this.options.tokens.session(account, force),
         catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
+        () => this.fetchCatalog(account, signal),
+      ), preferCached)
       return this.listed(provider, discovered)
     } catch (error: unknown) {
       // A cancelled discovery must not fall back to the static catalog — the

@@ -18,7 +18,16 @@ export declare const ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/toke
 export declare const ANTIGRAVITY_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo";
 export declare const ANTIGRAVITY_DEFAULT_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";
 export declare const ANTIGRAVITY_PROD_BASE_URL = "https://cloudcode-pa.googleapis.com";
-export declare const ANTIGRAVITY_DEFAULT_USER_AGENT = "antigravity/1.104.0 dsh-plugin-subscriptions";
+/**
+ * IDE version the backend sees. The catalog and model routing are gated on the
+ * desktop identity: with a 1.x agent the backend withholds the per-effort
+ * Gemini 3.8 Flash ids (`gemini-3.8-flash-high/medium/low`, 404 on generate)
+ * and offers only `gemini-3.8-flash-tiered`.
+ */
+export declare const ANTIGRAVITY_IDE_VERSION = "2.11.0";
+/** The Antigravity desktop user agent for one platform: `antigravity/ide/<version> <os>/<arch>`. */
+export declare function antigravityUserAgent(platform?: string, arch?: string): string;
+export declare const ANTIGRAVITY_DEFAULT_USER_AGENT: string;
 export declare const ANTIGRAVITY_PREEMPT_MS: number;
 /** Antigravity, not Gemini CLI, OAuth scopes from the local reference clients. */
 export declare const ANTIGRAVITY_SCOPES: readonly ["openid", "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/cclog", "https://www.googleapis.com/auth/experimentsandconfigs"];

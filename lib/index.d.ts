@@ -43,6 +43,14 @@ export interface Config {
      * compaction and session-title requests always stay on five minutes.
      */
     claudePromptCacheTtl?: PromptCacheTtl;
+    /**
+     * Muse Code only. Muse sometimes ends a turn right after a progress sentence
+     * that announces its next action ("now running the three variants:") without
+     * making the tool call, so the harness stops and waits for you to type
+     * "continue". With this on (the default) the route asks the model once to
+     * carry on in that case, and only then. Set false to get the raw behavior.
+     */
+    museAutoContinue?: boolean;
     /** Whether and how long a route waits out a closed rate-limit window. */
     rateLimit?: RateLimitConfig;
     /** Advisory model catalogs overriding the built-in defaults, per provider. */

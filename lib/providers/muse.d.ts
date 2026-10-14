@@ -22,7 +22,7 @@
  * PRs #13634 / #14267 (key mint contract).
  */
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
-import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { DeviceFlowSpec } from '../auth/device-flow.js';
 import type { MuseSession } from '../auth/store.js';
@@ -184,6 +184,64 @@ export interface MuseReplayResponse {
     reasoning: ReasoningReplayItem[];
 }
 /**
+ * Why a turn can end early on Muse. The model sometimes replies with one short
+ * progress sentence that announces its next action ("now running the three
+ * variants:") and then ends the response without making the tool call. The
+ * stream is a normal `completed` response — no `phase`, `end_turn`, or status
+ * marks it, and it is indistinguishable on the wire from a real final answer —
+ * so the harness, which ends a turn at the first response without a tool call,
+ * stops and waits for the user to type "continue".
+ *
+ * Measured against the real API with one recorded request replayed: at some
+ * points of a long tool loop the model stops this way on most samples, at
+ * others on a few percent. A persistence instruction in `instructions` and the
+ * catalog's `temperature`/`top_p` defaults did not change that. What does work
+ * is what the user does by hand, so the adapter does it once: it shows the
+ * model its own reply followed by this notice, and keeps the answer only if it
+ * makes a tool call.
+ *
+ * The notice asks the question before it offers the way out. A first draft
+ * said "if the task is not finished, continue now"; on short replies that
+ * really were final (a year, a hostname) it made the model add a needless tool
+ * call once in 24 tries, where this wording added none in 24. Both continued
+ * every real early stop.
+ */
+export declare const MUSE_DANGLING_STOP_NOTICE: string;
+/**
+ * Longest text-only reply the dangling-stop check looks at. In the recorded
+ * Muse sessions every premature stop was 110 characters or fewer and every
+ * real final answer after tool work was 428 or more.
+ */
+export declare const MUSE_DANGLING_STOP_MAX_CHARS = 300;
+/**
+ * Whether a text-only reply reads as "I am about to do something" rather than
+ * as an answer. Only short, unstructured replies qualify: anything long, with
+ * code, a table, or a list is a report, and a question or an offer to the user
+ * is a deliberate hand-back. Of what is left, a trailing colon counts (the
+ * promised content never followed), and so does an announced next step; a short
+ * reply that neither announces nor claims to be finished is treated as dangling
+ * too, because the cost of being wrong is one extra request whose answer is
+ * dropped when the model really was done.
+ * @param text - the reply's text blocks, joined.
+ * @returns true when the turn most likely ended early.
+ */
+export declare function museDanglingText(text: string): boolean;
+/**
+ * Whether the model is in the middle of a tool loop: the newest real input is
+ * a tool result, not something the user typed. DSH slips its own context
+ * messages (time, instructions, catalogs) between the two as user-role
+ * messages with another `source.kind`; those are skipped. A reply to a fresh
+ * user message is an answer, never a dangling stop.
+ * @param messages - the request's messages.
+ */
+export declare function museMidToolLoop(messages: GenerateOptions['messages']): boolean;
+/**
+ * Usage of a step that took two requests. The kept response's request is the
+ * context the next step starts from, so its input and cache counts stand; the
+ * other response only adds the tokens it generated.
+ */
+export declare function museMergedUsage(kept: TokenUsage | undefined, other: TokenUsage | undefined): TokenUsage | undefined;
+/**
  * Index the replayable reasoning of earlier assistant turns by call id. Only
  * turns this route produced for the same model and account qualify: encrypted
  * reasoning is bound to the model and credential that minted it. Every call
@@ -228,6 +286,11 @@ export interface MuseAdapterOptions {
     rateLimit?: RateLimitWait;
     /** Waits between retries of a transient `model_not_found` (tests shorten it). */
     modelNotFoundBackoffMs?: readonly number[];
+    /**
+     * Continue a turn the model ended right after announcing its next step, with
+     * one extra request (default true; see {@link MUSE_DANGLING_STOP_NOTICE}).
+     */
+    continueDanglingStop?: boolean;
     /** Clock for the blocked-network recheck window (tests advance it). */
     now?: () => number;
 }
@@ -270,6 +333,25 @@ export declare class MuseAdapter extends LlmAdapter {
     /** Pool seam: stream through one specific account instead of the default. */
     streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk>;
     private streamCore;
+    /**
+     * Whether a finished response may be the early end described at
+     * {@link MUSE_DANGLING_STOP_NOTICE}: a short text-only reply to a tool result,
+     * from a request that offered tools, that does not read as a final answer.
+     */
+    private endedEarly;
+    /**
+     * Ask the model once whether it meant to carry on after a short text-only
+     * reply. The second request shows it its own reply followed by
+     * {@link MUSE_DANGLING_STOP_NOTICE}; the notice itself never reaches the
+     * conversation. If the answer makes a tool call it continues the first
+     * response's message (block indexes carry on from it); a text-only answer
+     * means the model really was done, so it is dropped unseen and the first
+     * reply stands. The continuation is best effort: a failure before it has
+     * produced output leaves the turn exactly as the model ended it.
+     * @returns the second response and whether it was kept, or undefined when
+     *   the request itself failed.
+     */
+    private continueAfterAnnouncement;
     private request;
 }
 export {};

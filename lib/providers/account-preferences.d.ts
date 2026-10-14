@@ -1,5 +1,5 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { ProviderId } from '../auth/store.js';
 import type { ProviderSettingsStore, AccountPreferences } from '../provider-settings.js';
 import type { AccountAwareAdapter } from './accounts.js';
@@ -28,7 +28,7 @@ interface Options {
 export declare class AccountPreferencesAdapter extends LlmAdapter {
     private readonly options;
     constructor(options: Options);
-    providerInfo(provider: string): import("@deepseek-ai/dsh-llm").LlmProviderInfo;
+    providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(provider: string): import("@deepseek-ai/dsh-llm").ResolvedRetryPolicy | undefined;
     private preference;
     private models;
@@ -39,6 +39,8 @@ export declare class AccountPreferencesAdapter extends LlmAdapter {
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     prepareCall(provider: string, id: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;
+    /** Presentation only: routing still uses the original model id. */
+    private present;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
 }
 export {};

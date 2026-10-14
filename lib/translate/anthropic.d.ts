@@ -44,6 +44,25 @@ export declare const CACHE_CONTROL_1H: {
  * skipped), leaving the previous assistant reply as the body's last word.
  */
 export declare const TRAILING_USER_PLACEHOLDER = "Continue.";
+/**
+ * How long Anthropic keeps a conversation cache entry after its last use:
+ * five minutes (the API default) or one hour. The tools+system prefix is
+ * always pinned at one hour ({@link CACHE_CONTROL_1H}), as Claude Code does;
+ * this TTL applies to the conversation marks only. A one-hour entry is written at twice the base
+ * input price instead of 1.25×, and reads cost the same either way.
+ */
+export type PromptCacheTtl = '5m' | '1h';
+/** The API default; a marker at this TTL carries no `ttl` field at all. */
+export declare const DEFAULT_PROMPT_CACHE_TTL: PromptCacheTtl;
+/**
+ * Build one `cache_control` marker.
+ *
+ * Five minutes is spelled by omitting `ttl`, so a request that does not opt in
+ * stays byte-identical to what earlier releases sent.
+ * @param ttl - cache lifetime; defaults to five minutes.
+ * @returns a fresh marker object (callers attach it to one block each).
+ */
+export declare function cacheControl(ttl?: PromptCacheTtl): Record<string, unknown>;
 /** One Anthropic request message. */
 export interface AnthropicMessage {
     role: 'user' | 'assistant';
@@ -117,11 +136,14 @@ export declare function reconcileAnthropicToolPairs(messages: readonly Anthropic
  * Marks are counted across the flattened block sequence, not per message,
  * because the lookback window Anthropic walks counts blocks the same way.
  * @param messages - assembled Anthropic messages, marked in place.
+ * @param ttl - cache lifetime for every mark; defaults to five minutes. The
+ * tools+system anchor is always 1h, so a 5m or 1h mark here never follows a
+ * shorter one (Anthropic rejects a 1h breakpoint behind a 5m one).
  * @param marks - breakpoints to place; defaults to {@link
  * MESSAGE_CACHE_BREAKPOINTS}, the budget left for the history once the system
  * and tool anchors are placed (Anthropic allows four markers per request).
  */
-export declare function markMessageCache(messages: readonly AnthropicMessage[], marks?: number): void;
+export declare function markMessageCache(messages: readonly AnthropicMessage[], ttl?: PromptCacheTtl, marks?: number): void;
 /**
  * Build the Anthropic `system` array: the mandatory Claude Code identity
  * block, then the explicit system prompt, then any system-role messages.

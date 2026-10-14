@@ -28,8 +28,7 @@ export declare function modelsFilePath(): string;
 export declare function sanitizeSnapshot(value: unknown): CatalogSnapshot | undefined;
 /**
  * Build the durable half of one provider's catalog cache over the shared
- * models.json file (concurrent writers are last-writer-wins, acceptable for
- * a cache).
+ * models.json file. Snapshot mutations are serialized across providers/accounts.
  * @param provider - the provider route keying the file entry.
  * @param path - store file path; defaults to {@link modelsFilePath}.
  * @returns the persistence hooks for {@link ModelCatalogCache}.

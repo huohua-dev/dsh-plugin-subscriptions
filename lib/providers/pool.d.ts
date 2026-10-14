@@ -101,6 +101,17 @@ export declare class PoolAdapter extends LlmAdapter {
     private select;
     /** Pin the serving member to the session (with bounded memory). */
     private remember;
-    /** Preserve real failures, including when every member was skipped by health. */
+    /**
+     * The error for an exhausted pool. It says WHY (issue #139) and carries the
+     * real failure's own code, never a synthetic `RATE_LIMIT`: a member failure
+     * of this request, or the health record (with the failure that parked it)
+     * that kept a member out of the candidate set. A member is blocked until
+     * both its member and account cooldowns expire; the recovery hint is scoped
+     * to THIS pool's members (the health registry is shared across pools).
+     *
+     * A transiently failed member is preferred over another account's terminal
+     * quota/auth failure so the retry path stays visible; only when every
+     * account is out of quota is the task told to stop.
+     */
     private exhausted;
 }

@@ -78,6 +78,11 @@ export declare function refreshCodex(session: CodexSession): Promise<CodexSessio
  */
 export declare function isCodexPermanentRefreshError(error: unknown): boolean;
 export declare const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+export declare const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+/** Read available banked resets. This endpoint is private and intentionally read-only. */
+export declare function fetchCodexResetCredits(session: CodexSession, fetchFn?: FetchFn, signal?: AbortSignal): Promise<NonNullable<ProviderUsage['resetCredits']>>;
+/** Spend one banked reset. The caller must already have confirmed the credit is still available. */
+export declare function consumeCodexResetCredit(session: CodexSession, creditId: string, requestId: string, fetchFn?: FetchFn, signal?: AbortSignal): Promise<void>;
 /**
  * Fetch the codex subscription usage from the ChatGPT backend wham/usage
  * endpoint (the source of the codex CLI `/status` rate-limit lines). The
@@ -132,6 +137,7 @@ export interface CodexAdapterOptions {
     resolveAttachments?: () => AttachmentStore | undefined;
     /** Durable catalog store seeding capability metadata across restarts. */
     catalogStore?: CatalogPersistence;
+    onCatalogChanged?: () => void;
     /** Durable store for one NON-default account's catalog (the default's lives in `catalogStore`). */
     accountCatalogStore?: (account: string) => CatalogPersistence;
     /** Per-account catalog bound for the picker union (defaults to {@link DISCOVERY_TIMEOUT_MS}). */
@@ -166,6 +172,14 @@ export declare const CODEX_UNKNOWN_TOOL_OUTCOME = "The tool call has no recorded
  */
 export declare function reconcileResponsesToolCalls(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'];
 /**
+ * The `reasoning.effort` wire value for a selected effort. Codex's "ultra" is
+ * a client-side selection (max reasoning plus proactive sub-agent delegation)
+ * that the Codex CLI itself lowers to `max` at the Responses API boundary;
+ * the backend answers HTTP 400 to a literal `ultra`. Discovery no longer
+ * lists it, but an effort saved before that change may still arrive here.
+ */
+export declare function codexWireEffort(effort: string): string;
+/**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
  * `service_tier: priority`; the tier field is omitted entirely otherwise,
@@ -180,6 +194,8 @@ export declare class CodexAdapter extends LlmAdapter {
     private readonly catalog;
     /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
     private readonly accountCatalogs;
+    private accountCatalogsInvalidated;
+    private readonly invalidatedAccounts;
     /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
     private catalogOwner;
     constructor(options: CodexAdapterOptions);
@@ -187,7 +203,7 @@ export declare class CodexAdapter extends LlmAdapter {
     private fetchCatalog;
     /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
     clearAccountCatalog(account?: string): void;
-    /** Persisted cache for the default account; a throwaway cache for any other. */
+    /** Default and secondary accounts each seed their own persisted catalog. */
     private catalogFor;
     /** Picker rows for discovered entries (the wire id doubles as the route id). */
     private listed;
@@ -202,7 +218,7 @@ export declare class CodexAdapter extends LlmAdapter {
     private staticModels;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     /** The provider's own catalog: union of every account, or one account when named. */
-    listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
+    listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>;
     /**
      * The discovered entry for one model. Resolved through the cache's
      * stale-while-revalidate path so capability metadata stays stable across a

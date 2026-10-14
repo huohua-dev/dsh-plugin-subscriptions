@@ -13,6 +13,7 @@ export interface AccountStatus {
 }
 /** One provider's login state as answered by the `status` endpoint. */
 export interface ProviderStatus {
+    displayName?: string;
     busy: boolean;
     accounts: AccountStatus[];
     detail?: string;
@@ -35,6 +36,12 @@ export interface ProviderUsage {
     supported: boolean;
     windows?: UsageWindow[];
     plan?: string;
+    resetCredits?: {
+        id?: string;
+        grantedAt?: number;
+        expiresAt?: number;
+    }[];
+    resetCreditsError?: string;
 }
 /** One model's default-effort picker state as answered by `modelDefaults`. */
 export interface ModelDefaultView {

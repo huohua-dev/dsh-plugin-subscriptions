@@ -85,6 +85,8 @@ export interface AntigravityAdapterOptions {
     fetchFn?: FetchFn;
     resolveAttachments?: () => AttachmentStore | undefined;
     catalogStore?: CatalogPersistence;
+    onCatalogChanged?: () => void;
+    accountCatalogStore?: (account: string) => CatalogPersistence;
     defaultEffortOf?: (model: string) => string | undefined;
 }
 /** DSH provider adapter for the `antigravity` route. */
@@ -92,19 +94,21 @@ export declare class AntigravityAdapter extends LlmAdapter {
     private readonly options;
     private readonly catalog;
     private readonly accountCatalogs;
+    private accountCatalogsInvalidated;
+    private readonly invalidatedAccounts;
     private catalogOwner;
     constructor(options: AntigravityAdapterOptions);
     providerInfo(provider: string): LlmProviderInfo;
     /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
     clearAccountCatalog(account?: string): void;
-    /** Persisted cache for the default account; a throwaway cache for any other. */
+    /** Default and secondary accounts each seed their own persisted catalog. */
     private catalogFor;
     providerRetryPolicy(provider: string): import("@deepseek-ai/dsh-llm").ResolvedRetryPolicy;
     private staticModels;
     private fetchCatalog;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     /** The provider's own catalog: union of every account, or one account when named. */
-    listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
+    listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>;
     private discovered;
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */

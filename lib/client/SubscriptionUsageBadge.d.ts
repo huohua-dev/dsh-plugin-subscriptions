@@ -51,7 +51,7 @@ export declare function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisp
 export declare function createCurrentModelReader(models: () => ModelDirectoriesLike | undefined, sessionId: string): SubscriptionUsageBadgeInjected['currentModel'];
 /**
  * Compact time-remaining label derived from the window's `resetsAt` timestamp:
- * "6d18h" (days+hours), "1h58m" (hours+minutes), or "42m" (minutes only).
+ * "6d 18h" (days+hours), "1h 58m" (hours+minutes), or "42m" (minutes only).
  * Falls back to the scope/kind abbreviation when no reset time is known.
  */
 export declare function windowLabel(w: UsageWindow): string;
@@ -78,7 +78,7 @@ export declare function expandedDisplays(displays: readonly ProviderUsageDisplay
 type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => string;
 /**
  * The composer subscription-usage badge: a pill reading e.g.
- * `Codex 6d1h 25%` for the current model's provider, opening a dialog with
+ * `Codex 6d 1h 25%` for the current model's provider, opening a dialog with
  * every provider's accounts and their windows. Returns null when no data is
  * available.
  */

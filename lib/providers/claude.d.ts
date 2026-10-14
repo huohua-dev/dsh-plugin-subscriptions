@@ -10,6 +10,7 @@ import type { ClaudeSession } from '../auth/store.js';
 import type { PoolAdapter } from './pool.js';
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { TranslatableMessage } from '../translate/resolved.js';
+import type { PromptCacheTtl } from '../translate/anthropic.js';
 export { CLAUDE_ENTRYPOINT, applyClaudeCodeIdentity, claudeBetaFlags, claudeBillingHeader, claudeCliUserAgent, claudeFakeUserId, claudeRequestHeaders, claudeStainlessHeaders, } from './claude-identity.js';
 import { AccountTokenManager } from './accounts.js';
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage } from './common.js';
@@ -166,6 +167,8 @@ export interface ClaudeAdapterOptions {
     resolveAttachments?: () => AttachmentStore | undefined;
     /** Durable catalog store seeding capability metadata across restarts. */
     catalogStore?: CatalogPersistence;
+    onCatalogChanged?: () => void;
+    accountCatalogStore?: (account: string) => CatalogPersistence;
     /**
      * Per-model default reasoning effort override (the Settings page's picker).
      * Returns the user-configured default for one model, or undefined to follow
@@ -174,6 +177,13 @@ export interface ClaudeAdapterOptions {
     defaultEffortOf?: (model: string) => string | undefined;
     /** Resolves the Claude Code version to present (npm-backed); absent means the local floor. */
     resolveCliVersion?: () => Promise<string>;
+    /** Lifetime of the request's cache breakpoints; absent means Anthropic's five-minute default. */
+    promptCacheTtl?: PromptCacheTtl;
+    /**
+     * The user's Settings-page choice, read per request so a save applies to
+     * the next turn without a restart; undefined falls back to `promptCacheTtl`.
+     */
+    promptCacheTtlOverride?: () => PromptCacheTtl | undefined;
 }
 /**
  * Inline image data a Claude request may carry, in base64 bytes. Every turn
@@ -198,22 +208,29 @@ export declare const CLAUDE_REQUEST_IMAGE_BUDGET: number;
  * @param maxTokens - the resolved output cap.
  * @param thinking - the thinking parameter, when the model takes one.
  * @param effort - the reasoning effort, when the model advertises efforts.
+ * @param cacheTtl - lifetime of the conversation cache breakpoints; defaults to
+ * five minutes. The tools+system anchor is always 1h, as Claude Code sends it.
+ * Requests that carry a `purpose` (compaction, session titles) always use five
+ * minutes to preserve their existing auxiliary-request behavior. A five-minute
+ * mark can still read an entry a one-hour mark wrote.
  * @returns the JSON body to POST.
  */
-export declare function claudeRequestBody(options: GenerateOptions, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string): Record<string, unknown>;
+export declare function claudeRequestBody(options: GenerateOptions, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string, cacheTtl?: PromptCacheTtl): Record<string, unknown>;
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 export declare class ClaudeAdapter extends LlmAdapter {
     private readonly options;
     private readonly catalog;
     /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
     private readonly accountCatalogs;
+    private accountCatalogsInvalidated;
+    private readonly invalidatedAccounts;
     /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
     private catalogOwner;
     constructor(options: ClaudeAdapterOptions);
     private fetchCatalog;
     /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
     clearAccountCatalog(account?: string): void;
-    /** Persisted cache for the default account; a throwaway cache for any other. */
+    /** Default and secondary accounts each seed their own persisted catalog. */
     private catalogFor;
     private discovered;
     private staticModels;
@@ -221,7 +238,7 @@ export declare class ClaudeAdapter extends LlmAdapter {
     providerRetryPolicy(provider: string): import("@deepseek-ai/dsh-llm").ResolvedRetryPolicy;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     /** The provider's own catalog: union of every account, or one account when named. */
-    listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
+    listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */
     resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;

@@ -194,6 +194,12 @@ export interface UsageWindow {
     /** Epoch milliseconds at which the window resets, when the provider discloses it. */
     resetsAt?: number;
 }
+/** One banked Codex reset credit, returned by the private ChatGPT backend API. */
+export interface ResetCredit {
+    id?: string;
+    grantedAt?: number;
+    expiresAt?: number;
+}
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
     /** False when the provider has no usage endpoint (grok); windows are absent then. */
@@ -202,6 +208,10 @@ export interface ProviderUsage {
     windows?: UsageWindow[];
     /** Plan name the usage endpoint reported, when present. */
     plan?: string;
+    /** Available banked Codex full resets, when the backend discloses them. */
+    resetCredits?: ResetCredit[];
+    /** Optional reset lookup failure; ordinary usage remains usable. */
+    resetCreditsError?: string;
 }
 /** One model discovered from a provider's live model-list endpoint. */
 export interface DiscoveredModel {
@@ -293,7 +303,7 @@ export declare function mergeReasoning(configuredDefault: string | undefined, ba
  * resolves — the same isolation as the picker catalog union.
  */
 export declare function discoverAcrossAccounts(accounts: readonly string[], lookup: (account: string) => Promise<DiscoveredModel | undefined>): Promise<DiscoveredModel | undefined>;
-/** How long a discovered catalog is trusted before re-fetching. */
+/** Skip scheduled refreshes when the last successful catalog is this recent. */
 export declare const DISCOVERY_TTL_MS: number;
 /** A durable snapshot of one provider's discovered catalog. */
 export interface CatalogSnapshot {
@@ -315,16 +325,17 @@ export interface CatalogPersistence {
  * when to REFRESH; it never makes the cache forget: capability metadata
  * (reasoning efforts) must stay stable for a session that selected an effort,
  * or mid-conversation calls fail UNSUPPORTED_REASONING_EFFORT the moment the
- * cache goes stale. `listModels` awaits freshness via {@link get};
- * `resolveModel` uses {@link resolve}, which serves the last-known catalog
- * while a stale entry refreshes in the background, and only awaits the fetch
- * when nothing is known yet. An optional {@link CatalogPersistence} seeds the
+ * cache goes stale. `get` awaits freshness unless its caller opts into
+ * cache-only picker/routing reads. The startup/hourly job owns automatic
+ * refreshes; `resolveModel` uses {@link resolve}, which serves the last-known
+ * catalog and only awaits the fetch when nothing is known yet. An optional {@link CatalogPersistence} seeds the
  * last-known state across restarts and receives every successful fetch. A 401
  * that still fails after a forced token refresh must call {@link invalidate}.
  */
 export declare class ModelCatalogCache {
     private readonly persistence?;
     private readonly ttlMs;
+    private readonly onChanged?;
     private entry;
     private inflight;
     /** Settles once the persisted snapshot (when any) has been considered. */
@@ -333,7 +344,7 @@ export declare class ModelCatalogCache {
     private seedDisabled;
     /** Bumped by {@link invalidate} so a loser in-flight fetch cannot write back. */
     private generation;
-    constructor(persistence?: CatalogPersistence | undefined, ttlMs?: number);
+    constructor(persistence?: CatalogPersistence | undefined, ttlMs?: number, onChanged?: (() => void) | undefined);
     /**
      * The cached catalog when fresh, without fetching.
      * @returns the cached models, or `undefined` when absent or stale.
@@ -352,15 +363,16 @@ export declare class ModelCatalogCache {
     /**
      * Return the cached catalog when fresh, otherwise fetch and cache it.
      * @param fetcher - performs the provider's model-list request.
+     * @param preferCached - serve saved metadata; the startup/hourly job owns automatic refreshes.
      * @returns the discovered models.
      * @throws the fetcher's failure (the `listModels` caller warns and falls back).
      */
-    get(fetcher: () => Promise<DiscoveredModel[]>): Promise<readonly DiscoveredModel[]>;
+    get(fetcher: () => Promise<DiscoveredModel[]>, preferCached?: boolean): Promise<readonly DiscoveredModel[]>;
     /**
      * The models for capability resolution. A fresh cache answers directly; a
-     * stale one answers immediately from the last-known catalog while a
-     * background refresh runs (a mid-conversation `resolveModel` must neither
-     * block on nor fail with the network); a cold cache awaits one fetch.
+     * stale one answers immediately from the last-known catalog. Only the
+     * startup/hourly job refreshes known metadata automatically; a cold cache
+     * awaits one fetch.
      * @param fetcher - performs the provider's model-list request.
      * @returns the models, or `undefined` when nothing is known (the caller
      *   falls back to its static metadata). Never throws.

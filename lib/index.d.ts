@@ -11,6 +11,7 @@ import z from '@deepseek-ai/schemastery';
 import type { ProviderId } from './auth/store.js';
 import type { ModelEntry } from './providers/common.js';
 import type { RateLimitConfig } from './providers/rate-limit.js';
+import type { PromptCacheTtl } from './translate/anthropic.js';
 import type { CliVersion, NpmCliVersionCache } from './providers/npm-cli-version.js';
 export type { AccountPreferences, ProviderPreferences } from './provider-settings.js';
 import type { PoolMemberRef } from './providers/pool-family.js';
@@ -34,6 +35,14 @@ export interface Config {
     providers?: ProviderId[];
     /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
     streamIdleTimeoutMs?: number;
+    /**
+     * How long Anthropic keeps the Claude conversation cache after its last use:
+     * `'5m'` (default, the API's own default) or `'1h'`. One hour writes cache
+     * entries at 2× the input price instead of 1.25×, and pays off when you
+     * regularly pause longer than five minutes between messages. Claude only;
+     * compaction and session-title requests always stay on five minutes.
+     */
+    claudePromptCacheTtl?: PromptCacheTtl;
     /** Whether and how long a route waits out a closed rate-limit window. */
     rateLimit?: RateLimitConfig;
     /** Advisory model catalogs overriding the built-in defaults, per provider. */

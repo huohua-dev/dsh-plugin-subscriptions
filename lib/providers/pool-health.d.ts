@@ -53,6 +53,13 @@ export interface HealthRecord {
     reason: string;
     failure?: LlmError;
 }
+/** One cooling record, named by its registry key (feeds the exhausted-pool diagnosis). */
+export interface CoolingRecord {
+    key: string;
+    unavailableUntil: number;
+    /** The failure code that parked the member (`RATE_LIMIT`, `AUTH`, `SERVER`, …). */
+    reason: string;
+}
 /**
  * Cooldown registry keyed by {@link memberKey}. A member whose cooldown has
  * expired is simply available again — recovery is proven by the next real
@@ -66,8 +73,13 @@ export declare class PoolHealthRegistry {
     isAvailable(key: string, now?: number): boolean;
     /** Park a member for `cooldownMs`; a longer existing cooldown wins. */
     markUnavailable(key: string, cooldownMs: number, reason: string, now?: number, failure?: LlmError): void;
-    /** The effective blocker: both account and member must recover before a call. */
-    memberBlocker(provider: ProviderId, account: string, model: string, now?: number): HealthRecord | undefined;
+    /**
+     * The effective blocker, named by its registry key: both account and member
+     * must recover before a call, so the later-recovering record wins.
+     */
+    memberBlocker(provider: ProviderId, account: string, model: string, now?: number): (HealthRecord & {
+        key: string;
+    }) | undefined;
     /**
      * Epoch ms at which the earliest cooling record among `keys` recovers;
      * `undefined` when none of them is cooling. The registry is shared by
@@ -77,6 +89,13 @@ export declare class PoolHealthRegistry {
      * `providerRetryAfterMs`.
      */
     earliestRecovery(keys: ReadonlySet<string>, now?: number): number | undefined;
+    /**
+     * The earliest-recovering cooling record among `keys` (with the failure
+     * code that parked it), or `undefined` when none of them is cooling. Lets
+     * an exhausted pool say WHY its members are parked, instead of assuming a
+     * rate limit.
+     */
+    earliestRecoveryRecord(keys: ReadonlySet<string>, now?: number): CoolingRecord | undefined;
     /** Drop records of one provider, or of a single account when given (auth changes). */
     clear(provider: ProviderId, account?: string): void;
 }

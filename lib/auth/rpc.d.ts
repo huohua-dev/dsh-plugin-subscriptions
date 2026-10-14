@@ -25,7 +25,7 @@ export declare const SUBSCRIPTIONS_AUTH_PREFIX = "subscriptions-auth.";
  * Every endpoint {@link dispatch} answers; each gets one exact Fetch route.
  * Kept in one place so the route table and the switch cannot drift apart.
  */
-export declare const SUBSCRIPTIONS_AUTH_ENDPOINTS: readonly ["providerSettings", "setProviderSettings", "status", "login", "manual", "cancel", "logout", "setDefault", "usage", "image", "video", "speed", "setSpeed", "proxyGet", "proxySet", "proxyTest", "modelDefaults", "setModelDefault"];
+export declare const SUBSCRIPTIONS_AUTH_ENDPOINTS: readonly ["providerSettings", "setProviderSettings", "status", "login", "manual", "cancel", "logout", "setDefault", "usage", "image", "video", "prepareReset", "consumeReset", "speed", "setSpeed", "proxyGet", "proxySet", "proxyTest", "modelDefaults", "setModelDefault"];
 /** Decoded image bytes returned by the `image` endpoint. */
 export interface ImageBytesResult {
     mediaType: string;
@@ -67,6 +67,7 @@ export interface AccountStatus {
 }
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+    displayName?: string;
     /** Whether a login attempt is currently waiting for its code. */
     busy: boolean;
     /** Logged-in accounts, default first. */
@@ -124,6 +125,8 @@ export interface ProviderAccountCatalog {
 }
 /** Provider and account preference operations behind providerSettings/setProviderSettings. */
 export interface ProviderSettingsController {
+    /** Local preferences only: status must not fetch a model catalog. */
+    displayName?(provider: ProviderId): string | undefined;
     get(provider: ProviderId, force: boolean): Promise<unknown>;
     set(provider: ProviderId, settings: unknown): Promise<void>;
 }
@@ -135,6 +138,8 @@ export interface ModelDefaultsController {
 }
 /** Provider-agnostic auth operations the RPC handler delegates to. */
 export interface AuthController {
+    prepareReset?(account: string, signal: AbortSignal): Promise<unknown>;
+    consumeReset?(account: string, ticket: string, signal: AbortSignal): Promise<void>;
     /** Current status of one provider. */
     status(provider: ProviderId): Promise<ProviderStatus>;
     /**

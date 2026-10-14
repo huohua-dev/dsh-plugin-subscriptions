@@ -181,6 +181,14 @@ export interface Config {
    * compaction and session-title requests always stay on five minutes.
    */
   claudePromptCacheTtl?: PromptCacheTtl
+  /**
+   * Muse Code only. Muse sometimes ends a turn right after a progress sentence
+   * that announces its next action ("now running the three variants:") without
+   * making the tool call, so the harness stops and waits for you to type
+   * "continue". With this on (the default) the route asks the model once to
+   * carry on in that case, and only then. Set false to get the raw behavior.
+   */
+  museAutoContinue?: boolean
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -239,6 +247,7 @@ export const Config: z<Config> = z.object({
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
+  museAutoContinue: z.boolean().default(true),
   rateLimit: z.object({
     wait: z.boolean().default(false),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -1065,6 +1074,7 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('muse', account),
           defaultEffortOf: model => defaultEffortOf('muse', model),
+          continueDanglingStop: config.museAutoContinue !== false,
           pool: () => poolAdapter,
         })
         adapters.set('muse', adapter)

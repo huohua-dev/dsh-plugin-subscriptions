@@ -184,6 +184,7 @@ Codex 模型还可填写上下文 token 数。插件读取每个账号的 `conte
     providers: [codex, claude]        # 子集;默认五个全启用
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
+    museAutoContinue: true             # Muse:模型宣告下一步后收尾时自动追问一次(默认开启)
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)
       maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
@@ -193,6 +194,8 @@ Codex 模型还可填写上下文 token 数。插件读取每个账号的 `conte
       copilot:                         # 手工条目会关闭 Copilot 目录发现
         - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`museAutoContinue`（默认 `true`）控制下文 Muse Code 一节所述的提前收尾保护：设为 `false` 则原样返回模型的收尾方式。
 
 `claudePromptCacheTtl` 决定 Anthropic 在最近一次使用之后保留 Claude 对话缓存多久。工具+系统提示前缀的
 缓存断点始终带 `ttl: "1h"`（与 Claude Code 一致），此设置只控制对话中的缓存断点：默认 `5m` 不带 `ttl`
@@ -217,6 +220,8 @@ tools+effort 的自动改道。
 Antigravity 已内置 [pi-antigravity 使用的公开桌面 OAuth 客户端配置](https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/SECURITY.md#oauth-client-credentials)，无需额外配置客户端即可点击「登录」进入 Google 授权。使用自定义客户端时，可配置 `antigravity.clientId` 及其可选的 `antigravity.clientSecret`，或设置 `ANTIGRAVITY_CLIENT_ID` 及其可选的 `ANTIGRAVITY_CLIENT_SECRET`。优先级为插件配置、环境变量、内置默认值；ID 和 secret 按同一来源成对读取，自定义 ID 不会继承默认 secret，单独提供 secret 会报错。可选的 `antigravity.baseURL`、`antigravity.userAgent` 和 `antigravity.onboard` 分别控制 API 地址、客户端标识和账号初始化。默认客户端标识与桌面 IDE 一致（`antigravity/ide/<版本> <系统>/<架构>`）；上游按它决定下发哪些模型（旧标识拿不到分档位的 Gemini 3.8 Flash），除非需要固定为别的值，否则 `userAgent` 留空即可。账号无权使用的条目（标记为 `disabled` 或 `*-disabled` 占位模型，例如非 AI Ultra 账号的 Gemini 4 Argon）不会出现在模型选择器中。此路由使用 Antigravity OAuth 与 v1internal 项目封装，独立于 Gemini CLI。
 
 Muse Code 复用 Muse CLI 自己的登录方式：在 `auth.meta.com` 走设备码流程（CLI 的公开 client id）拿到 Meta 身份 token，再到 `api.meta.ai/muse-code/key` 换取请求用的 Model API key。身份 token 会保留下来，每天重新签发一次 key（签发是幂等的，不会轮换 CLI 正在用的 key）。同一个签发响应还会返回账号邮箱、订阅档位以及 5 小时/每周用量窗口。请求格式与 CLI 一致（`reasoning.summary: auto`、加密推理、`store: false`、prompt-cache key，以及 CLI 的 user agent 和 `x-client-id`/会话请求头）；推理等级为 `minimal` 到 `max`（默认 `high`）。带工具调用的回合会把已完成的推理项存进该回合的回放状态，下一轮在对应 function call 之前回传，且只回传给相同模型和账号；如果 Meta 以 HTTP 400 拒绝，会去掉推理项重试一次。模型列表来自 CLI 使用的 `api.meta.ai/muse-code/models`（含上下文/输出上限、输入模态、推理档、是否隐藏）。Meta 会在部分网络（包括一些商用代理出口）屏蔽 Muse：在这类网络上目录返回为空（此时使用内置的 Muse Wonder 1.0 / Spark 1.3 / Spark 1.2 目录，并只警告一次），部分模型的请求会时不时被以 404 `model_not_found` 拒绝。每一次这样的拒绝，还会让 Meta 在几分钟内对整个账号、在所有网络上间歇性地拒绝该模型——其他设备、干净 VPS 上的官方 Muse CLI 也不例外（已用同一个 key 实测验证；读取目录或成功的请求不会触发）。因此在目录为空的网络上遇到 `model_not_found` 会立即以 `MUSE_NETWORK_BLOCKED` 失败：不重试，也不冷却账号池成员；之后五分钟内的请求会先重新检查目录再决定是否发送，避免再次被拒。在能列出目录的网络上，404 说明账号还在恢复：插件会就地重试（约 7 秒），仍失败则报为可重试的服务端错误，让 harness 继续重试。请让 `api.meta.ai` 走 Meta 不屏蔽的网络（VPS 或住宅出口，或插件代理设置）；切换后的几分钟内仍可能间歇性出现 404。TLS 和 HTTP/2 指纹不是原因：CLI 本身使用 rustls 上的 HTTP/1.1，在被屏蔽的网络上同样会被拒绝。
+
+**中途停下。** Muse 有时会在一句进度说明（"现在按三档跑图生图："）之后直接结束这一轮，而不发出它刚宣告要做的工具调用。在接口层面这就是一个普通的 `completed` 响应——没有 `phase`、`end_turn` 或状态位能把它和真正的最终回答区分开——所以按"第一个没有工具调用的响应即结束本轮"工作的 harness 就停下来，等你输入"继续"。同一个请求原样回放，在长工具循环的某些节点上多数采样都会这样停，在另一些节点上只有百分之几；在系统提示里加持续工作的指令、或带上目录下发的 `temperature`/`top_p` 默认值，都没有改变这一点。因此这个路由替你手动做的那一步，只做一次：当对工具结果的回复很短、只有文字、而且看起来不像最终回答（不是向你提问或征求意见，没有列表或代码，也没说"已完成"）时，会带着模型自己的这句话再请求一次，并附一条通知，问它是否宣告了还没执行的动作。回答里若有工具调用，就接在同一条助手消息后面（通知本身不会写进对话）；若只回文字，说明模型确实已经说完，这次回答直接丢弃、不会展示。这次追加请求是尽力而为——失败时本轮仍按模型原样结束——简短但完整的回答会多花一次被丢弃的请求。在已记录的会话里，所有提前停下的回复都不超过 110 个字符，而工具工作之后的真正回答都不少于 428 个字符。用 `museAutoContinue: false` 可以关闭。
 
 Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用兼容的 `parameters` 子集；本地 schema 引用会先展开，不修改 DSH 工具注册表。无法解析、循环引用及无法表达的自定义工具联合类型会在发送前报错。已识别的模型系列会在模型设置中提供推理等级，并转换为对应的推理预算；文本、推理和工具调用签名仅回放给相同 provider/model。兼容映射参考 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity/tree/697858cafcf1faddf2ae898d2f053b2ff26c05e6)，离线测试不代表账号资格或在线 API 验收通过。
 

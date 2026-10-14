@@ -31,12 +31,14 @@ import type {
   LlmResolvedModelInfo,
   ReplayEnvelope,
   StreamChunk,
+  TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { DeviceFlowSpec } from '../auth/device-flow.js'
 import type { MuseSession, ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
 import { resolveImages } from '../translate/resolved.js'
+import type { TranslatableMessage } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ReasoningReplayItem, ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
 import {
@@ -58,6 +60,7 @@ import type {
   CatalogPersistence,
   DiscoveredModel,
   FetchFn,
+  IdleWatchdog,
   ModelEntry,
   ProviderUsage,
   UsageWindow,
@@ -497,6 +500,183 @@ function completedReasoningItem(item: NonNullable<ResponsesStreamEvent['item']>)
 }
 
 /**
+ * Why a turn can end early on Muse. The model sometimes replies with one short
+ * progress sentence that announces its next action ("now running the three
+ * variants:") and then ends the response without making the tool call. The
+ * stream is a normal `completed` response — no `phase`, `end_turn`, or status
+ * marks it, and it is indistinguishable on the wire from a real final answer —
+ * so the harness, which ends a turn at the first response without a tool call,
+ * stops and waits for the user to type "continue".
+ *
+ * Measured against the real API with one recorded request replayed: at some
+ * points of a long tool loop the model stops this way on most samples, at
+ * others on a few percent. A persistence instruction in `instructions` and the
+ * catalog's `temperature`/`top_p` defaults did not change that. What does work
+ * is what the user does by hand, so the adapter does it once: it shows the
+ * model its own reply followed by this notice, and keeps the answer only if it
+ * makes a tool call.
+ *
+ * The notice asks the question before it offers the way out. A first draft
+ * said "if the task is not finished, continue now"; on short replies that
+ * really were final (a year, a hostname) it made the model add a needless tool
+ * call once in 24 tries, where this wording added none in 24. Both continued
+ * every real early stop.
+ */
+export const MUSE_DANGLING_STOP_NOTICE = '[automatic notice] Your previous reply ended without a tool call, so the turn '
+  + 'stopped. Did that reply announce an action (a command, a tool call, a file read, a check) that you have not '
+  + 'performed yet? If yes, perform it now with the tool call and no other text. If no, because the task is complete '
+  + "or you need the user's input, reply with only the word NONE."
+
+/**
+ * Longest text-only reply the dangling-stop check looks at. In the recorded
+ * Muse sessions every premature stop was 110 characters or fewer and every
+ * real final answer after tool work was 428 or more.
+ */
+export const MUSE_DANGLING_STOP_MAX_CHARS = 300
+
+/** A reply that hands control to the user on purpose: a question or an offer. */
+const MUSE_ADDRESSED_TO_USER = new RegExp([
+  '[?？]\\s*$',
+  '如果你|如果需要|如果想|要不要|需要我|要我|你可以|你想|你看|你说一声|告诉我|让我知道|请你|请确认|是否需要|是否要|需不需要',
+  "if you|would you|do you want|want me to|let me know|shall i|should i|feel free",
+].join('|'), 'i')
+
+/** A last sentence that says the next action is still to come. */
+const MUSE_ANNOUNCES_NEXT_STEP = new RegExp([
+  '现在|接着|接下来|然后|随后|下面|下一步|马上|立刻|立即|这就|我就|我来|我去|我先|我再|待会|稍后|之后再|继续|开始|最后(?:再)?(?:核对|检查|确认|验证|看)',
+  '(?:先|再|去|来|要|得|准备|打算)[^，。；;\\n]{0,8}(?:看|查|读|跑|试|写|改|拼|搜|找|装|提取|对比|比较|确认|核对|检查|验证|运行|执行|调用|提交|生成|出图|对照|打开|拉取|拆)',
+  "\\b(?:let me|let's|i'll|i will|i'm going to|i am going to|i'm about to|going to|about to|now i|next,? i|then i|first,? i|will now|proceeding|continuing|moving on)\\b",
+].join('|'), 'i')
+
+/** A last sentence that reports the work as done, or the answer as found. */
+const MUSE_REPORTS_DONE = new RegExp([
+  '已完成|完成了|搞定|已修复|已经修复|修好了|已推送|已提交|已更新|已创建|已删除|已安装|已部署|已合并|全部通过|测试通过|通过了|成功',
+  '没有(?:问题|错误|发现|找到|匹配|变化|改动)|无需|不需要|一切正常|结果如下|结论',
+  '\\b(?:done|finished|completed|fixed|all set|pushed|committed|deployed|merged|pass(?:es|ed)?|succeeded|no (?:issues|errors|problems|changes)|nothing (?:to|more|left))\\b',
+].join('|'), 'i')
+
+/**
+ * Whether a text-only reply reads as "I am about to do something" rather than
+ * as an answer. Only short, unstructured replies qualify: anything long, with
+ * code, a table, or a list is a report, and a question or an offer to the user
+ * is a deliberate hand-back. Of what is left, a trailing colon counts (the
+ * promised content never followed), and so does an announced next step; a short
+ * reply that neither announces nor claims to be finished is treated as dangling
+ * too, because the cost of being wrong is one extra request whose answer is
+ * dropped when the model really was done.
+ * @param text - the reply's text blocks, joined.
+ * @returns true when the turn most likely ended early.
+ */
+export function museDanglingText(text: string): boolean {
+  const reply = text.trim()
+  if (reply.length === 0 || reply.length > MUSE_DANGLING_STOP_MAX_CHARS) return false
+  if (reply.includes('```')) return false
+  const structured = reply.split('\n').filter(line => /^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\|)/.test(line))
+  if (structured.length >= 2) return false
+  if (MUSE_ADDRESSED_TO_USER.test(reply)) return false
+  if (/[:：]\s*$/.test(reply)) return true
+  const sentences = reply.split(/[。！!？?\n]+/).map(sentence => sentence.trim()).filter(sentence => sentence.length > 0)
+  const last = sentences.at(-1) ?? reply
+  if (MUSE_ANNOUNCES_NEXT_STEP.test(last)) return true
+  return !MUSE_REPORTS_DONE.test(last)
+}
+
+/**
+ * Whether the model is in the middle of a tool loop: the newest real input is
+ * a tool result, not something the user typed. DSH slips its own context
+ * messages (time, instructions, catalogs) between the two as user-role
+ * messages with another `source.kind`; those are skipped. A reply to a fresh
+ * user message is an answer, never a dangling stop.
+ * @param messages - the request's messages.
+ */
+export function museMidToolLoop(messages: GenerateOptions['messages']): boolean {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!
+    if (message.role === 'tool') return true
+    if (message.role === 'assistant') return false
+    if (message.role === 'user') {
+      const kind = (message as { source?: { kind?: string } }).source?.kind
+      if (kind === undefined || kind === 'user') return false
+    }
+  }
+  return false
+}
+
+/**
+ * Usage of a step that took two requests. The kept response's request is the
+ * context the next step starts from, so its input and cache counts stand; the
+ * other response only adds the tokens it generated.
+ */
+export function museMergedUsage(kept: TokenUsage | undefined, other: TokenUsage | undefined): TokenUsage | undefined {
+  if (kept === undefined || other === undefined) return kept ?? other
+  const reasoning = (kept.reasoningTokens ?? 0) + (other.reasoningTokens ?? 0)
+  return {
+    ...kept,
+    outputTokens: kept.outputTokens + other.outputTokens,
+    ...kept.reasoningTokens !== undefined || other.reasoningTokens !== undefined ? { reasoningTokens: reasoning } : {},
+  }
+}
+
+/** What one Responses stream produced: the replay material and the dangling-stop inputs. */
+interface MuseStreamOutcome {
+  /** Function-call ids this response emitted. */
+  calls: string[]
+  /** Completed reasoning items, replayed ahead of the first of those calls. */
+  reasoning: ReasoningReplayItem[]
+  /** The response's text blocks, in order. */
+  text: string[]
+  /** Blocks opened: the next free block index. */
+  blocks: number
+  /** Whether the response opened a tool-call block. */
+  toolCalls: boolean
+  usage?: TokenUsage
+  finish?: Extract<StreamChunk, { type: 'finish' }>
+}
+
+function newOutcome(): MuseStreamOutcome {
+  return { calls: [], reasoning: [], text: [], blocks: 0, toolCalls: false }
+}
+
+/** Fold one translated chunk into the outcome it belongs to. */
+function recordChunk(outcome: MuseStreamOutcome, chunk: StreamChunk): void {
+  switch (chunk.type) {
+    case 'block-start':
+      outcome.blocks = Math.max(outcome.blocks, chunk.index + 1)
+      if (chunk.blockType === 'tool-call') outcome.toolCalls = true
+      break
+    case 'block-end':
+      if (chunk.block.type === 'text') outcome.text.push(chunk.block.text)
+      break
+    case 'usage':
+      outcome.usage = chunk.usage
+      break
+    case 'finish':
+      outcome.finish = chunk
+      break
+  }
+}
+
+/** The event tap that captures call ids and completed reasoning items into `outcome`. */
+function captureInto(outcome: MuseStreamOutcome): (event: ResponsesStreamEvent) => ResponsesStreamEvent {
+  return event => {
+    const item = event.item
+    if (event.type === 'response.output_item.added' && item?.type === 'function_call'
+      && typeof item.call_id === 'string' && item.call_id.length > 0) {
+      outcome.calls.push(item.call_id)
+    } else if (event.type === 'response.output_item.done' && item?.type === 'reasoning') {
+      const captured = completedReasoningItem(item)
+      if (captured !== undefined) outcome.reasoning.push(captured)
+    }
+    return event
+  }
+}
+
+/** The chunk moved to a later block index (a second response continuing one message). */
+function shiftedChunk(chunk: StreamChunk, offset: number): StreamChunk {
+  return offset === 0 || !('index' in chunk) ? chunk : { ...chunk, index: chunk.index + offset }
+}
+
+/**
  * Index the replayable reasoning of earlier assistant turns by call id. Only
  * turns this route produced for the same model and account qualify: encrypted
  * reasoning is bound to the model and credential that minted it. Every call
@@ -599,6 +779,11 @@ export interface MuseAdapterOptions {
   rateLimit?: RateLimitWait
   /** Waits between retries of a transient `model_not_found` (tests shorten it). */
   modelNotFoundBackoffMs?: readonly number[]
+  /**
+   * Continue a turn the model ended right after announcing its next step, with
+   * one extra request (default true; see {@link MUSE_DANGLING_STOP_NOTICE}).
+   */
+  continueDanglingStop?: boolean
   /** Clock for the blocked-network recheck window (tests advance it). */
   now?: () => number
 }
@@ -815,17 +1000,18 @@ export class MuseAdapter extends LlmAdapter {
       const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
       const replay = museReasoningIndex(options.messages, options.provider, options.model, accountKey)
       let replaying = replay.size > 0
-      const body = (): string => JSON.stringify(museRequestBody(
+      const bodyOf = (history: readonly TranslatableMessage[]) => (): string => JSON.stringify(museRequestBody(
         options,
-        toResponsesInput(messages, options.system, replaying ? callId => replay.get(callId) : undefined),
+        toResponsesInput(history, options.system, replaying ? callId => replay.get(callId) : undefined),
       ))
-      const send = async (): Promise<Response> => {
-        let response = await this.request(body(), session, options.sessionId, watchdog.signal)
+      const body = bodyOf(messages)
+      const send = async (build: () => string): Promise<Response> => {
+        let response = await this.request(build(), session, options.sessionId, watchdog.signal)
         if (response.status === 401) {
           // One forced re-mint + retry on an unexpired-but-rejected key.
           await response.body?.cancel().catch(() => undefined)
           session = await this.options.tokens.session(account, true)
-          response = await this.request(body(), session, options.sessionId, watchdog.signal)
+          response = await this.request(build(), session, options.sessionId, watchdog.signal)
         }
         if (response.status === 400 && replaying) {
           // A gateway that rejects the replayed reasoning items must not break
@@ -833,7 +1019,7 @@ export class MuseAdapter extends LlmAdapter {
           await response.body?.cancel().catch(() => undefined)
           replaying = false
           this.options.onWarn?.('muse rejected replayed reasoning items; retrying the request without them')
-          response = await this.request(body(), session, options.sessionId, watchdog.signal)
+          response = await this.request(build(), session, options.sessionId, watchdog.signal)
         }
         return response
       }
@@ -850,7 +1036,7 @@ export class MuseAdapter extends LlmAdapter {
         }
         this.blockedAt.delete(blockKey)
       }
-      let response = await send()
+      let response = await send(body)
       let modelNotFound = false
       for (let attempt = 0; response.status === 404; attempt++) {
         // Body read once here; a rebuilt Response carries it to the error path.
@@ -866,7 +1052,7 @@ export class MuseAdapter extends LlmAdapter {
           break
         }
         await sleep(backoff[attempt]!, watchdog.signal)
-        response = await send()
+        response = await send(body)
       }
       if (!response.ok) {
         const error = await httpLlmError(response, 'muse API', {
@@ -890,27 +1076,34 @@ export class MuseAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError('muse API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      const calls: string[] = []
-      const reasoning: ReasoningReplayItem[] = []
-      const capture = (event: ResponsesStreamEvent): ResponsesStreamEvent => {
-        const item = event.item
-        if (event.type === 'response.output_item.added' && item?.type === 'function_call'
-          && typeof item.call_id === 'string' && item.call_id.length > 0) {
-          calls.push(item.call_id)
-        } else if (event.type === 'response.output_item.done' && item?.type === 'reasoning') {
-          const captured = completedReasoningItem(item)
-          if (captured !== undefined) reasoning.push(captured)
-        }
-        return event
+      // Everything but `usage` and `finish` is relayed as it arrives; those two
+      // are held until the turn is known to be over, because a response that
+      // ends early (see MUSE_DANGLING_STOP_NOTICE) is continued by a second
+      // request whose chunks carry on the same assistant message.
+      const first = newOutcome()
+      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, captureInto(first))) {
+        recordChunk(first, chunk)
+        if (chunk.type !== 'usage' && chunk.type !== 'finish') yield chunk
       }
-      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, capture)) {
-        if (chunk.type === 'finish' && chunk.reason.kind === 'tool-calls' && calls.length > 0 && reasoning.length > 0) {
+      let kept = first
+      let dropped: MuseStreamOutcome | undefined
+      if (this.endedEarly(first, options)) {
+        this.options.onWarn?.('muse ended a tool loop with a short text-only reply; asking the model once whether it meant to carry on')
+        const continued = yield* this.continueAfterAnnouncement({ options, history: messages, first, bodyOf, send, watchdog })
+        if (continued?.kept === true) { dropped = first; kept = continued.outcome } else dropped = continued?.outcome
+      }
+      const usage = museMergedUsage(kept.usage, dropped?.usage)
+      if (usage !== undefined) yield { type: 'usage', usage }
+      const finish = kept.finish
+      if (finish !== undefined) {
+        if (finish.reason.kind === 'tool-calls' && kept.calls.length > 0 && kept.reasoning.length > 0) {
           const state: MuseReplayResponse = {
-            kind: 'muse', version: 1, ...accountKey === undefined ? {} : { account: accountKey }, calls, reasoning,
+            kind: 'muse', version: 1, ...accountKey === undefined ? {} : { account: accountKey },
+            calls: kept.calls, reasoning: kept.reasoning,
           }
-          yield { ...chunk, replayState: { response: state } }
+          yield { ...finish, replayState: { response: state } }
         } else {
-          yield chunk
+          yield finish
         }
       }
     } catch (error: unknown) {
@@ -918,6 +1111,80 @@ export class MuseAdapter extends LlmAdapter {
     } finally {
       watchdog.stop()
     }
+  }
+
+  /**
+   * Whether a finished response may be the early end described at
+   * {@link MUSE_DANGLING_STOP_NOTICE}: a short text-only reply to a tool result,
+   * from a request that offered tools, that does not read as a final answer.
+   */
+  private endedEarly(first: MuseStreamOutcome, options: GenerateOptions): boolean {
+    return this.options.continueDanglingStop !== false
+      && first.finish?.reason.kind === 'stop'
+      && !first.toolCalls
+      && first.calls.length === 0
+      && (options.tools?.length ?? 0) > 0
+      && museMidToolLoop(options.messages)
+      && museDanglingText(first.text.join('\n\n'))
+  }
+
+  /**
+   * Ask the model once whether it meant to carry on after a short text-only
+   * reply. The second request shows it its own reply followed by
+   * {@link MUSE_DANGLING_STOP_NOTICE}; the notice itself never reaches the
+   * conversation. If the answer makes a tool call it continues the first
+   * response's message (block indexes carry on from it); a text-only answer
+   * means the model really was done, so it is dropped unseen and the first
+   * reply stands. The continuation is best effort: a failure before it has
+   * produced output leaves the turn exactly as the model ended it.
+   * @returns the second response and whether it was kept, or undefined when
+   *   the request itself failed.
+   */
+  private async *continueAfterAnnouncement(input: {
+    options: GenerateOptions
+    history: readonly TranslatableMessage[]
+    first: MuseStreamOutcome
+    bodyOf: (history: readonly TranslatableMessage[]) => () => string
+    send: (body: () => string) => Promise<Response>
+    watchdog: IdleWatchdog
+  }): AsyncGenerator<StreamChunk, { outcome: MuseStreamOutcome; kept: boolean } | undefined> {
+    const { options, first, watchdog } = input
+    const second = newOutcome()
+    // Chunks wait here until the response proves it is a tool call; text
+    // before that point is dropped with a text-only answer.
+    const held: StreamChunk[] = []
+    let committed = false
+    try {
+      const response = await input.send(input.bodyOf([
+        ...input.history,
+        { role: 'assistant', content: [{ type: 'text', text: first.text.join('\n\n') }] },
+        { role: 'user', content: [{ type: 'text', text: MUSE_DANGLING_STOP_NOTICE }] },
+      ]))
+      if (!response.ok || response.body === null) {
+        await response.body?.cancel().catch(() => undefined)
+        this.options.onWarn?.(`muse continuation of a short text-only reply was refused (HTTP ${String(response.status)}); the turn ends as the model ended it`)
+        return undefined
+      }
+      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, captureInto(second))) {
+        recordChunk(second, chunk)
+        if (chunk.type === 'usage' || chunk.type === 'finish') continue
+        const placed = shiftedChunk(chunk, first.blocks)
+        if (committed) { yield placed; continue }
+        held.push(placed)
+        if (chunk.type === 'block-start' && chunk.blockType === 'tool-call') {
+          committed = true
+          yield* held
+          held.length = 0
+        }
+      }
+    } catch (error: unknown) {
+      // Once the continuation has started to reach the harness, or when the
+      // request was cancelled, the failure belongs to the caller.
+      if (committed || watchdog.signal.aborted) throw error
+      this.options.onWarn?.(`muse continuation of a short text-only reply failed (${errorChain(error)}); the turn ends as the model ended it`)
+      return undefined
+    }
+    return { outcome: second, kept: committed }
   }
 
   private request(body: string, session: MuseSession, sessionId: GenerateOptions['sessionId'], signal: AbortSignal): Promise<Response> {

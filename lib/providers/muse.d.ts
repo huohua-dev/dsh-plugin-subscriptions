@@ -38,7 +38,8 @@ export declare const MUSE_DEVICE_TOKEN_URL = "https://auth.meta.com/oidc/device/
 /** Exchanges the OIDC identity token for the Model API key (and reports tier + usage). */
 export declare const MUSE_KEY_URL = "https://api.meta.ai/muse-code/key";
 export declare const MUSE_API_URL = "https://api.meta.ai/v1/responses";
-export declare const MUSE_MODELS_URL = "https://api.meta.ai/v1/models";
+/** The Muse CLI's catalog: per-model limits, modalities, efforts, visibility. */
+export declare const MUSE_MODELS_URL = "https://api.meta.ai/muse-code/models";
 /** Muse CLI release this plugin presents itself as (user agent only). */
 export declare const MUSE_CLI_VERSION = "1.4.7";
 /**
@@ -131,9 +132,26 @@ export declare function fetchMuseUsage(session: MuseSession, fetchFn?: FetchFn, 
 /** Display name for a model id the catalog does not name (`muse-spark-1.3-contributor` → `Muse Spark 1.3 Contributor`). */
 export declare function museModelName(id: string): string;
 /**
- * Fetch the live model list. An empty list from a 200 response is a discovery
- * failure (the static catalog then serves), matching the Muse CLI, which ships
- * built-in models and treats the server catalog as an overlay.
+ * Meta gates the model catalog on the caller's network: from some egress IPs
+ * (commercial proxy exits among them) it answers an empty list on every call,
+ * while the same key lists every model from another network. Inference is not
+ * gated the same way (see {@link MUSE_MODEL_NOT_FOUND_HINT}), so the built-in
+ * catalog serves instead.
+ */
+export declare const MUSE_NETWORK_HINT: string;
+/**
+ * Meta's Responses gateway intermittently answers 404 `model_not_found` for
+ * models the account is entitled to: the same key and request succeed moments
+ * later (observed from every network, far more often from some proxy exits).
+ */
+export declare const MUSE_MODEL_NOT_FOUND_HINT: string;
+/** Waits between retries of a transient `model_not_found` (five retries, ~10 s worst case). */
+export declare const MUSE_MODEL_NOT_FOUND_BACKOFF_MS: readonly number[];
+/**
+ * Fetch the live model catalog the Muse CLI uses. Hidden entries and models
+ * that cannot chat (image generation, voice) are dropped. An empty list from a
+ * 200 response is a discovery failure (the static catalog then serves); it is
+ * what Meta answers to a gated network (see {@link MUSE_NETWORK_HINT}).
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation.
@@ -191,6 +209,8 @@ export interface MuseAdapterOptions {
     defaultEffortOf?: (model: string) => string | undefined;
     /** How long this route may hold a turn open waiting for a rate-limit window. */
     rateLimit?: RateLimitWait;
+    /** Waits between retries of a transient `model_not_found` (tests shorten it). */
+    modelNotFoundBackoffMs?: readonly number[];
 }
 /** Muse wire adapter: one instance serves the `muse` provider route. */
 export declare class MuseAdapter extends LlmAdapter {
@@ -200,6 +220,7 @@ export declare class MuseAdapter extends LlmAdapter {
     private accountCatalogsInvalidated;
     private readonly invalidatedAccounts;
     private catalogOwner;
+    private warnedEmptyCatalog;
     constructor(options: MuseAdapterOptions);
     private get fetchFn();
     private fetchCatalog;

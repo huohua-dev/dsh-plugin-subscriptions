@@ -63,7 +63,7 @@
 | `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取(仅对话模型);推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot  | 从 `api.githubcopilot.com/models` 实时获取(两种 wire 的对话模型,含按模型的视觉标记与推理等级);登录使用 OAuth 设备码流程(在 `github.com/login/device` 输入页面显示的验证码) |
 | `antigravity` | Google Antigravity | 从 Antigravity `v1internal:fetchAvailableModels` 实时获取;请求使用 `generateContent` / `streamGenerateContent`,支持文本、图片、流式推理与工具调用转换 |
-| `muse` | Meta Muse Code | `api.meta.ai/v1/models` 非空时使用实时目录，否则使用内置 Muse Spark 模型；请求走 `api.meta.ai/v1/responses` 的 Responses API；登录使用 Meta 设备码流程（在 `auth.meta.com` 确认显示的验证码） |
+| `muse` | Meta Muse Code | `api.meta.ai/muse-code/models` 非空时使用实时目录，否则使用内置 Muse Wonder / Spark 模型；请求走 `api.meta.ai/v1/responses` 的 Responses API；登录使用 Meta 设备码流程（在 `auth.meta.com` 确认显示的验证码） |
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
@@ -216,7 +216,7 @@ tools+effort 的自动改道。
 
 Antigravity 已内置 [pi-antigravity 使用的公开桌面 OAuth 客户端配置](https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/SECURITY.md#oauth-client-credentials)，无需额外配置客户端即可点击「登录」进入 Google 授权。使用自定义客户端时，可配置 `antigravity.clientId` 及其可选的 `antigravity.clientSecret`，或设置 `ANTIGRAVITY_CLIENT_ID` 及其可选的 `ANTIGRAVITY_CLIENT_SECRET`。优先级为插件配置、环境变量、内置默认值；ID 和 secret 按同一来源成对读取，自定义 ID 不会继承默认 secret，单独提供 secret 会报错。可选的 `antigravity.baseURL`、`antigravity.userAgent` 和 `antigravity.onboard` 分别控制 API 地址、客户端标识和账号初始化。默认客户端标识与桌面 IDE 一致（`antigravity/ide/<版本> <系统>/<架构>`）；上游按它决定下发哪些模型（旧标识拿不到分档位的 Gemini 3.8 Flash），除非需要固定为别的值，否则 `userAgent` 留空即可。账号无权使用的条目（标记为 `disabled` 或 `*-disabled` 占位模型，例如非 AI Ultra 账号的 Gemini 4 Argon）不会出现在模型选择器中。此路由使用 Antigravity OAuth 与 v1internal 项目封装，独立于 Gemini CLI。
 
-Muse Code 复用 Muse CLI 自己的登录方式：在 `auth.meta.com` 走设备码流程（CLI 的公开 client id）拿到 Meta 身份 token，再到 `api.meta.ai/muse-code/key` 换取请求用的 Model API key。身份 token 会保留下来，每天重新签发一次 key（签发是幂等的，不会轮换 CLI 正在用的 key）。同一个签发响应还会返回账号邮箱、订阅档位以及 5 小时/每周用量窗口。请求格式与 CLI 一致（`reasoning.summary: auto`、加密推理、`store: false`、prompt-cache key，以及 CLI 的 `x-client-id`/会话请求头）；推理等级为 `minimal` 到 `xhigh`（默认 `high`）。带工具调用的回合会把已完成的推理项存进该回合的回放状态，下一轮在对应 function call 之前回传，且只回传给相同模型和账号；如果 Meta 以 HTTP 400 拒绝，会去掉推理项重试一次。实时 `/v1/models` 目前返回空列表（CLI 也一样），因此模型选择器在它返回模型之前使用内置的 Muse Spark 目录。
+Muse Code 复用 Muse CLI 自己的登录方式：在 `auth.meta.com` 走设备码流程（CLI 的公开 client id）拿到 Meta 身份 token，再到 `api.meta.ai/muse-code/key` 换取请求用的 Model API key。身份 token 会保留下来，每天重新签发一次 key（签发是幂等的，不会轮换 CLI 正在用的 key）。同一个签发响应还会返回账号邮箱、订阅档位以及 5 小时/每周用量窗口。请求格式与 CLI 一致（`reasoning.summary: auto`、加密推理、`store: false`、prompt-cache key，以及 CLI 的 `x-client-id`/会话请求头）；推理等级为 `minimal` 到 `max`（默认 `high`）。带工具调用的回合会把已完成的推理项存进该回合的回放状态，下一轮在对应 function call 之前回传，且只回传给相同模型和账号；如果 Meta 以 HTTP 400 拒绝，会去掉推理项重试一次。模型列表来自 CLI 使用的 `api.meta.ai/muse-code/models`（含上下文/输出上限、输入模态、推理档、是否隐藏）。Meta 对部分网络会返回空目录（同一账号换个出口就能列出全部模型），此时使用内置的 Muse Wonder 1.0 / Spark 1.3 / Spark 1.2 目录，并只警告一次。Responses 网关还会对订阅内的模型间歇性返回 404 `model_not_found`——任何网络都会出现，部分代理出口明显更频繁。插件会就地退避重试（约 10 秒），仍失败则报为可重试的服务端错误，让 harness 继续重试，账号池也不会冷却该账号。如果持续失败，请让 `api.meta.ai` 走其他网络（VPS 或住宅出口，或插件代理设置）。
 
 Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用兼容的 `parameters` 子集；本地 schema 引用会先展开，不修改 DSH 工具注册表。无法解析、循环引用及无法表达的自定义工具联合类型会在发送前报错。已识别的模型系列会在模型设置中提供推理等级，并转换为对应的推理预算；文本、推理和工具调用签名仅回放给相同 provider/model。兼容映射参考 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity/tree/697858cafcf1faddf2ae898d2f053b2ff26c05e6)，离线测试不代表账号资格或在线 API 验收通过。
 

@@ -14,12 +14,16 @@ import {
   MUSE_KEY_URL,
   MUSE_MODELS_URL,
   MUSE_NETWORK_BLOCKED_CODE,
+  MUSE_DANGLING_STOP_NOTICE,
   MuseAdapter,
   completeMuseLogin,
   fetchMuseModels,
   isMusePermanentRefreshError,
   museDeviceFlow,
+  museDanglingText,
   museHeaders,
+  museMergedUsage,
+  museMidToolLoop,
   museModelName,
   museReasoningIndex,
   museRequestBody,
@@ -447,4 +451,206 @@ test('an unrelated 404 is not retried', async () => {
     (error: Error & { code?: string }) => error.code === 'HTTP_404',
   )
   assert.equal(calls.length, 1)
+})
+
+
+// ── Turns the model ends early ──────────────────────────────────────────────
+// Real replies from recorded sessions where Muse announced its next step and
+// stopped (the user had to type "continue"), and real final answers.
+
+const ENDED_EARLY = [
+  '结果出来了：本地只有 2 个 SDXL 底模、**没有 LoRA、也没有任何 ControlNet 模型**——所以能锁姿势的路就是拿原图做图生图重绘。再确认几个关键细节节点的输入格式，我就拼工作流。',
+  '原图已传到本地（`refs/ref_original.jpg`）。现在按三档重绘强度跑图生图：WAI 低强度（最还原姿势）、WAI 高强度（多给模型修身材的余地）、NoobAI 中强度（测它的人像识别）：',
+  '第一张（WAI 低强度）已经把原图姿势锁住了，先看完另外两档再一起对比。',
+  '核心证据已集齐，最后核对两件事：CLI 有没有批量建任务的子命令，以及「任务并发上限」会不会让批量开启自动排队。',
+  '目录已被 Git 忽略，继续跑静态构建验证，并核查 DSH 这边的预览方式不受影响（本改动只动上游前端，不涉及 DSH GUI）。',
+  '抓到插件本体的堆栈了。提取主 goroutine 和几个可疑的阻塞点：',
+  '第一档出来了，姿势和身材明显回到原图了。继续看剩下两张。',
+  '提示词记在 [v2.md](</tmp/prompts/v2.md>)。先跑最保守的一档——WAI 图生图、去噪 0.55，姿势和原图应该几乎重合：',
+  'Now I will run the build and then check the output.',
+  'Let me read the config file first:',
+]
+
+const REAL_ANSWERS = [
+  '已推送。',
+  '完成，测试全部通过。',
+  'All 42 tests pass.',
+  '没有发现问题。',
+  '修好了：把 `retry` 的默认值从 3 改成 5。',
+  '要我现在就开始实现吗？',
+  'If you want, I can run the tests next.',
+  '我有两个方案，你想用哪个：',
+  '完成：\n- 改了 a.ts\n- 改了 b.ts',
+  '改好了：\n```ts\nconst x = 1\n```',
+  '',
+  `${'这是一份完整的总结，列出了改动、验证方式和遗留风险。'.repeat(20)}`,
+]
+
+test('museDanglingText flags a short reply that announces what comes next, and leaves answers alone', () => {
+  for (const text of ENDED_EARLY) assert.equal(museDanglingText(text), true, text)
+  for (const text of REAL_ANSWERS) assert.equal(museDanglingText(text), false, text)
+})
+
+test('museMidToolLoop is true only while the newest real input is a tool result', () => {
+  const assistant = assistantTurn(undefined)
+  const injected = {
+    id: MessageId('i1'), role: 'user' as const, content: [{ type: 'text' as const, text: 'Time sampled while preparing turn 2' }],
+    source: { kind: 'time-context' as const },
+  }
+  const typed = { ...USER, id: MessageId('u2') }
+  const mid = (messages: unknown[]) => museMidToolLoop(messages as GenerateOptions['messages'])
+  assert.equal(mid([]), false)
+  assert.equal(mid([USER]), false, 'a fresh user message starts a turn')
+  assert.equal(mid([USER, assistant, TOOL_RESULT]), true)
+  assert.equal(mid([USER, assistant, TOOL_RESULT, injected]), true, 'context the harness injects does not end the loop')
+  assert.equal(mid([USER, assistant, TOOL_RESULT, typed]), false, 'a message the user typed does')
+  assert.equal(mid([{ ...USER, source: undefined }, assistant, TOOL_RESULT]), true)
+})
+
+test('museMergedUsage keeps the kept response context and adds the other response output', () => {
+  const kept = { inputTokens: 5, outputTokens: 3, cacheReadTokens: 60, reasoningTokens: 2 }
+  assert.deepEqual(museMergedUsage(kept, { inputTokens: 40, outputTokens: 12, cacheReadTokens: 60 }), {
+    inputTokens: 5, outputTokens: 15, cacheReadTokens: 60, reasoningTokens: 2,
+  })
+  assert.deepEqual(museMergedUsage(undefined, kept), kept)
+  assert.deepEqual(museMergedUsage(kept, undefined), kept)
+})
+
+const ANNOUNCEMENT_EVENTS = [
+  { type: 'response.output_text.delta', item_id: 'msg_1', delta: '现在跑第一档：' },
+  { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'msg_1' } },
+  { type: 'response.completed', response: { usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 60 }, output_tokens: 12 } } },
+]
+
+/** A request that is mid tool loop: the model just got a tool result. */
+const MID_LOOP = () => ({
+  provider: 'muse', model: 'muse-spark-1.3', tools: TOOLS, sessionId: 's-1',
+  messages: [USER, assistantTurn(undefined), TOOL_RESULT],
+}) as unknown as GenerateOptions
+
+function continuingAdapter(fetchFn: typeof fetch, extra: { continueDanglingStop?: boolean; warnings?: string[] } = {}): MuseAdapter {
+  return new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens({ accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }),
+    discovery: false,
+    fetchFn,
+    ...extra.continueDanglingStop === undefined ? {} : { continueDanglingStop: extra.continueDanglingStop },
+    ...extra.warnings === undefined ? {} : { onWarn: message => extra.warnings?.push(message) },
+  })
+}
+
+const inputOf = (call: { init: RequestInit | undefined } | undefined) =>
+  JSON.parse(String(call?.init?.body)).input as { type: string; role?: string; content?: { type: string; text: string }[] }[]
+
+test('a reply that announces a next step and stops is continued once, as part of the same message', async () => {
+  const warnings: string[] = []
+  const { calls, fetchFn } = recordingFetch((_url, _init, index) => sse(index === 0 ? ANNOUNCEMENT_EVENTS : TOOL_CALL_EVENTS))
+  const chunks = await collect(continuingAdapter(fetchFn, { warnings }).stream(MID_LOOP()))
+
+  assert.equal(calls.length, 2)
+  const second = inputOf(calls[1])
+  assert.deepEqual(second.slice(-2).map(item => [item.type, item.role, item.content?.[0]?.type]), [
+    ['message', 'assistant', 'output_text'],
+    ['message', 'user', 'input_text'],
+  ])
+  assert.equal(second.at(-2)?.content?.[0]?.text, '现在跑第一档：', 'the model sees its own announcement')
+  assert.equal(second.at(-1)?.content?.[0]?.text, MUSE_DANGLING_STOP_NOTICE)
+  assert.equal(inputOf(calls[0]).some(item => item.content?.some(part => part.text === MUSE_DANGLING_STOP_NOTICE)), false)
+
+  // One assistant message: the announcement, then the call at the next block index.
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'block-start').map(chunk => [chunk.index, chunk.blockType]), [
+    [0, 'text'], [1, 'tool-call'],
+  ])
+  const blockEnds = chunks.filter(chunk => chunk.type === 'block-end')
+  assert.deepEqual(blockEnds.map(chunk => chunk.block.type), ['text', 'tool-call'])
+  assert.equal(chunks.filter(chunk => chunk.type === 'usage').length, 1)
+  assert.equal(chunks.filter(chunk => chunk.type === 'finish').length, 1)
+  assert.equal(chunks.at(-1)?.type, 'finish')
+  const usage = chunks.find(chunk => chunk.type === 'usage')
+  assert.deepEqual(usage?.type === 'usage' ? usage.usage : undefined, { inputTokens: 5, outputTokens: 15 })
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'tool-calls')
+  const replay = finish?.type === 'finish' ? finish.replayState?.response as MuseReplayResponse : undefined
+  assert.deepEqual(replay, { kind: 'muse', version: 1, account: 'acct', calls: ['call_1'], reasoning: [REASONING_ITEM] })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0] ?? '', /short text-only reply/)
+})
+
+test('a continuation that only answers in text is dropped: the model really was done', async () => {
+  const { calls, fetchFn } = recordingFetch((_url, _init, index) => sse(index === 0 ? ANNOUNCEMENT_EVENTS : TEXT_EVENTS))
+  const chunks = await collect(continuingAdapter(fetchFn).stream(MID_LOOP()))
+  assert.equal(calls.length, 2)
+  const text = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+  assert.equal(text, '现在跑第一档：', 'the dropped answer is never shown')
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop' && finish.replayState === undefined)
+  const usage = chunks.find(chunk => chunk.type === 'usage')
+  assert.deepEqual(usage?.type === 'usage' ? usage.usage : undefined, { inputTokens: 40, cacheReadTokens: 60, outputTokens: 13 })
+})
+
+test('text the continuation writes before its tool call joins the message', async () => {
+  const withText = [
+    { type: 'response.output_text.delta', item_id: 'msg_2', delta: '开始。' },
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'msg_2' } },
+    { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'get_weather' } },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{}' },
+    { type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'get_weather', arguments: '{}' } },
+    { type: 'response.completed', response: { usage: { input_tokens: 5, output_tokens: 3 } } },
+  ]
+  const { fetchFn } = recordingFetch((_url, _init, index) => sse(index === 0 ? ANNOUNCEMENT_EVENTS : withText))
+  const chunks = await collect(continuingAdapter(fetchFn).stream(MID_LOOP()))
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'block-start').map(chunk => [chunk.index, chunk.blockType]), [
+    [0, 'text'], [1, 'text'], [2, 'tool-call'],
+  ])
+  const ends = chunks.filter(chunk => chunk.type === 'block-end')
+  assert.deepEqual(ends.map(chunk => chunk.index), [0, 1, 2])
+})
+
+test('nothing is continued for a reply to the user, a long answer, a complete tool call, or with the option off', async () => {
+  const run = async (options: GenerateOptions, events: unknown[], adapterOptions: { continueDanglingStop?: boolean } = {}) => {
+    const { calls, fetchFn } = recordingFetch(() => sse(events))
+    const chunks = await collect(continuingAdapter(fetchFn, adapterOptions).stream(options))
+    return { calls: calls.length, chunks }
+  }
+  const fresh = { provider: 'muse', model: 'muse-spark-1.3', tools: TOOLS, messages: [USER] } as unknown as GenerateOptions
+  assert.equal((await run(fresh, ANNOUNCEMENT_EVENTS)).calls, 1, 'a fresh user message starts a turn: an answer, not a stop')
+
+  const long = [
+    { type: 'response.output_text.delta', item_id: 'msg_1', delta: `${'这是一份完整的总结。'.repeat(60)}现在继续：` },
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'msg_1' } },
+    { type: 'response.completed', response: { usage: { input_tokens: 9, output_tokens: 1 } } },
+  ]
+  assert.equal((await run(MID_LOOP(), long)).calls, 1, 'long replies are reports')
+  assert.equal((await run(MID_LOOP(), TOOL_CALL_EVENTS)).calls, 1, 'a response with a tool call is not an early stop')
+  assert.equal((await run(MID_LOOP(), ANNOUNCEMENT_EVENTS, { continueDanglingStop: false })).calls, 1, 'the option switches it off')
+  const noTools = { ...MID_LOOP(), tools: undefined } as unknown as GenerateOptions
+  assert.equal((await run(noTools, ANNOUNCEMENT_EVENTS)).calls, 1, 'without tools there is nothing to continue with')
+  const off = await run(MID_LOOP(), ANNOUNCEMENT_EVENTS, { continueDanglingStop: false })
+  assert.equal(off.chunks.at(-1)?.type, 'finish')
+})
+
+test('a failed continuation leaves the turn as the model ended it, but a cancellation still propagates', async () => {
+  const warnings: string[] = []
+  const refused = recordingFetch((_url, _init, index) => index === 0 ? sse(ANNOUNCEMENT_EVENTS) : json({ error: { message: 'busy' } }, 500))
+  const chunks = await collect(continuingAdapter(refused.fetchFn, { warnings }).stream(MID_LOOP()))
+  assert.equal(refused.calls.length, 2)
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop')
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), '现在跑第一档：')
+  assert.ok(warnings.some(message => /continuation .* refused \(HTTP 500\)/.test(message)), warnings.join('\n'))
+
+  const controller = new AbortController()
+  const cancelled = recordingFetch(() => sse(ANNOUNCEMENT_EVENTS))
+  const aborting = ((input: RequestInfo | URL, init?: RequestInit) => {
+    if (cancelled.calls.length >= 1) {
+      controller.abort(new Error('user cancelled'))
+      return Promise.reject(new DOMException('This operation was aborted', 'AbortError'))
+    }
+    return cancelled.fetchFn(input, init)
+  }) as typeof fetch
+  await assert.rejects(
+    collect(continuingAdapter(aborting).stream({ ...MID_LOOP(), signal: controller.signal } as unknown as GenerateOptions)),
+    (error: Error & { code?: string }) => error.code === 'ABORTED',
+  )
 })

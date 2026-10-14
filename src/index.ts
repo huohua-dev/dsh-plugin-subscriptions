@@ -1,6 +1,6 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity) on `ctx.llm`, and expose the `/subscriptions-auth`
+ * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity, Meta Muse Code) on `ctx.llm`, and expose the `/subscriptions-auth`
  * RPC channel the web Settings page uses to run the logins. The token store
  * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
  * a host `connection` service exists, so headless compositions load fine.
@@ -59,6 +59,7 @@ import type {
   CopilotSession,
   AntigravitySession,
   GrokSession,
+  MuseSession,
   ProviderId,
   StoredSession,
 } from './auth/store.js'
@@ -133,6 +134,15 @@ import {
   refreshAntigravity,
   resolveAntigravityOAuthConfig,
 } from './providers/antigravity.js'
+import {
+  MuseAdapter,
+  MUSE_PREEMPT_MS,
+  completeMuseLogin,
+  fetchMuseUsage,
+  isMusePermanentRefreshError,
+  museDeviceFlow,
+  refreshMuse,
+} from './providers/muse.js'
 import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -143,7 +153,7 @@ import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './pr
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
+export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, MuseSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
@@ -180,6 +190,7 @@ export interface Config {
     grok?: ModelEntry[]
     copilot?: ModelEntry[]
     antigravity?: ModelEntry[]
+    muse?: ModelEntry[]
   }
   /** Antigravity-specific OAuth and endpoint configuration. */
   antigravity?: AntigravityRuntimeConfig & {
@@ -207,7 +218,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'muse'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -224,7 +235,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'muse']),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
@@ -238,6 +249,7 @@ export const Config: z<Config> = z.object({
     grok: z.array(modelEntrySchema),
     copilot: z.array(modelEntrySchema),
     antigravity: z.array(modelEntrySchema),
+    muse: z.array(modelEntrySchema),
   }),
   antigravity: z.object({
     clientId: z.string(),
@@ -292,6 +304,13 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 250_000, maxTokens: 64_000, inputModalities: ['text', 'image'] },
     { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', contextWindow: 250_000, maxTokens: 64_000, inputModalities: ['text', 'image'] },
   ],
+  // The Muse CLI's built-in models; the live /v1/models list wins when it is
+  // non-empty (it currently answers an empty list, as it does for the CLI).
+  muse: [
+    { id: 'muse-spark-1.3', name: 'Muse Spark 1.3' },
+    { id: 'muse-spark-1.3-contributor', name: 'Muse Spark 1.3 (Contributor)' },
+    { id: 'muse-spark-1.2', name: 'Muse Spark 1.2' },
+  ],
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -308,6 +327,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     grok: resolve('grok'),
     copilot: resolve('copilot'),
     antigravity: resolve('antigravity'),
+    muse: resolve('muse'),
   }
 }
 
@@ -325,6 +345,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'grok': return (session as GrokSession).account
     case 'copilot': return (session as CopilotSession).account
     case 'antigravity': return (session as AntigravitySession).account
+    case 'muse': return (session as MuseSession).account
   }
 }
 
@@ -335,6 +356,8 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'claude': return (session as ClaudeSession).subscriptionType
     case 'grok': return undefined
     case 'copilot': return undefined
+    case 'antigravity': return undefined
+    case 'muse': return (session as MuseSession).plan
   }
 }
 
@@ -518,10 +541,10 @@ export class SubscriptionsAuthController implements AuthController {
       this.completions.set('claude', this.complete('claude', attempt, this.claim('claude')))
       return { authorizeUrl: attempt.authorizeUrl }
     }
-    if (provider === 'copilot') {
+    if (provider === 'copilot' || provider === 'muse') {
       // Device flow: no redirect URI — the UI shows the user code while the
-      // background task polls GitHub for the token.
-      const attempt = await this.deviceFlows.start(provider, copilotDeviceFlow())
+      // background task polls the authorization server for the token.
+      const attempt = await this.deviceFlows.start(provider, provider === 'copilot' ? copilotDeviceFlow() : museDeviceFlow())
       this.beginFinalizing(provider)
       void this.completeDevice(provider, attempt)
       return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
@@ -587,11 +610,11 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
-  /** Drive one device-flow attempt to a stored session (the copilot path of {@link complete}). */
+  /** Drive one device-flow attempt to a stored session (the copilot/muse path of {@link complete}). */
   private async completeDevice(provider: ProviderId, attempt: DeviceAttempt): Promise<void> {
     try {
-      const githubToken = await attempt.waitToken()
-      const session = await completeCopilotLogin(githubToken)
+      const token = await attempt.waitToken()
+      const session = await this.completeDeviceLogin(provider, token)
       await this.persist(provider, session)
       this.lastError.delete(provider)
       this.onAuthChanged(provider, accountKeyOf(provider, session))
@@ -605,6 +628,11 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
+  /** Turn a device-flow token into a session; `protected` so tests can stand in for the provider endpoint. */
+  protected completeDeviceLogin(provider: ProviderId, token: string): Promise<StoredSession> {
+    return provider === 'muse' ? completeMuseLogin(token) : completeCopilotLogin(token)
+  }
+
   /** Token exchange for one OAuth code; `protected` so tests can stand in for the provider endpoint. */
   protected exchange(provider: ProviderId, code: string, attempt: OAuthAttempt): Promise<StoredSession> {
     switch (provider) {
@@ -615,8 +643,9 @@ export class SubscriptionsAuthController implements AuthController {
       case 'grok':
         return exchangeGrokCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.pkce.challenge)
       case 'copilot':
+      case 'muse':
         // Device flow: exchange happens in completeDevice, never here.
-        return Promise.reject(new Error('copilot uses the device flow; no authorization code to exchange'))
+        return Promise.reject(new Error(`${provider} uses the device flow; no authorization code to exchange`))
       case 'antigravity':
         return exchangeAntigravityCode(
           code,
@@ -1006,6 +1035,42 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('antigravity', register('antigravity', adapter))
         break
       }
+      case 'muse': {
+        const tokens = new AccountTokenManager<MuseSession>({
+          provider: 'muse',
+          displayName: 'Muse Code (Meta)',
+          makeOptions: () => ({
+            preemptMs: MUSE_PREEMPT_MS,
+            refresh: session => refreshMuse(session),
+            isPermanent: isMusePermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('muse', account) },
+        })
+        accountTokens.set('muse', tokens as AccountTokenManager<StoredSession>)
+        // The usage source is the idempotent key mint, authorized by the
+        // identity token; peek avoids a pointless re-mint of the stored key.
+        usageFetchers.muse = async (account, signal) => {
+          const session = await tokens.peek(account) ?? await tokens.session(account)
+          return fetchMuseUsage(session, proxiedFetch, signal)
+        }
+        const adapter = new MuseAdapter({
+          models: catalog.muse,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          discovery: !overridden.has('muse'),
+          onWarn,
+          resolveAttachments,
+          catalogStore: catalogStore('muse'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('muse', account),
+          defaultEffortOf: model => defaultEffortOf('muse', model),
+          pool: () => poolAdapter,
+        })
+        adapters.set('muse', adapter)
+        handles.set('muse', register('muse', adapter))
+        break
+      }
     }
   }
 
@@ -1051,6 +1116,11 @@ export function apply(ctx: Context, config: Config): void {
             await tokens.session(account) as AntigravitySession, config.antigravity, proxiedFetch,
             AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
           )
+        }
+        case 'muse': {
+          const fetcher = usageFetchers.muse
+          return fetcher === undefined ? undefined : () =>
+            fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
         }
         case 'copilot':
           return undefined

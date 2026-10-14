@@ -1,8 +1,9 @@
 /**
- * GitHub OAuth device-authorization flow (RFC 8628) for providers that cannot
- * use the loopback redirect engine: no redirect URI, no PKCE, no client
- * secret. The user opens a verification URL and types a short code while the
- * plugin polls the token endpoint until GitHub releases the access token.
+ * OAuth device-authorization flow (RFC 8628) for providers that cannot use
+ * the loopback redirect engine (GitHub Copilot, Meta Muse Code): no redirect
+ * URI, no PKCE, no client secret. The user opens a verification URL and types
+ * (or confirms) a short code while the plugin polls the token endpoint until
+ * the authorization server releases the access token.
  * The management model (one attempt per provider, `isBusy`/`pending`/`cancel`)
  * mirrors {@link OAuthFlowManager} so the auth controller can treat both
  * engines uniformly.
@@ -19,19 +20,27 @@ const DEFAULT_EXPIRES_IN_SEC = 900
 export interface DeviceFlowSpec {
   /** OAuth App / GitHub App client id the device code is requested for. */
   clientId: string
-  /** Scope string requested at device-code time. */
-  scope: string
+  /** Scope string requested at device-code time; omitted from the request when absent. */
+  scope?: string
   /** Device-code endpoint (e.g. `https://github.com/login/device/code`). */
   deviceCodeUrl: string
   /** Token polling endpoint (e.g. `https://github.com/login/oauth/access_token`). */
   tokenUrl: string
+  /** Extra headers sent on both device-flow endpoints (e.g. a client user agent). */
+  headers?: Record<string, string>
+  /** Brand named in the access-denied message (default: the provider route). */
+  brand?: string
   /** Fetch implementation (injectable for tests). */
   fetchFn?: typeof fetch
 }
 
 /** One in-flight device-flow login attempt. */
 export interface DeviceAttempt {
-  /** URL the user opens to authorize (e.g. `https://github.com/login/device`). */
+  /**
+   * URL the user opens to authorize (e.g. `https://github.com/login/device`).
+   * The server's `verification_uri_complete` wins when it sent one: that page
+   * already carries the code, so the user only confirms it.
+   */
   readonly verificationUrl: string
   /** Short code the user types at the verification URL. */
   readonly userCode: string
@@ -49,6 +58,7 @@ interface DeviceCodeWire {
   device_code?: string
   user_code?: string
   verification_uri?: string
+  verification_uri_complete?: string
   interval?: number
   expires_in?: number
 }
@@ -123,8 +133,12 @@ export class DeviceFlowManager {
       headers: {
         'accept': 'application/json',
         'content-type': 'application/x-www-form-urlencoded',
+        ...spec.headers,
       },
-      body: new URLSearchParams({ client_id: spec.clientId, scope: spec.scope }).toString(),
+      body: new URLSearchParams({
+        client_id: spec.clientId,
+        ...spec.scope === undefined ? {} : { scope: spec.scope },
+      }).toString(),
     })
     if (!response.ok) {
       throw new Error(`${provider} device-code request failed (HTTP ${String(response.status)})`)
@@ -177,6 +191,7 @@ export class DeviceFlowManager {
           headers: {
             'accept': 'application/json',
             'content-type': 'application/x-www-form-urlencoded',
+            ...spec.headers,
           },
           body: new URLSearchParams({
             client_id: spec.clientId,
@@ -185,7 +200,9 @@ export class DeviceFlowManager {
           }).toString(),
           signal: controller.signal,
         })
-        const result = await pollResponse.json() as DeviceTokenWire
+        // Some servers answer a pending poll with a non-JSON 4xx/5xx body;
+        // an unreadable body is a failure worth naming, not a parse crash.
+        const result = await pollResponse.json().catch(() => ({})) as DeviceTokenWire
         if (typeof result.access_token === 'string' && result.access_token.length > 0) {
           settle(undefined, result.access_token)
           return
@@ -198,7 +215,7 @@ export class DeviceFlowManager {
             intervalMs += 5000
             break
           case 'access_denied':
-            settle(new Error('login declined on the GitHub authorization page'))
+            settle(new Error(`login declined on the ${spec.brand ?? provider} authorization page`))
             return
           case 'expired_token':
             settle(new Error('the device code expired before authorization completed'))
@@ -212,8 +229,11 @@ export class DeviceFlowManager {
       }
     }
 
+    const complete = typeof wire.verification_uri_complete === 'string' && wire.verification_uri_complete.length > 0
+      ? wire.verification_uri_complete
+      : undefined
     const attempt: DeviceAttempt = {
-      verificationUrl: wire.verification_uri,
+      verificationUrl: complete ?? wire.verification_uri,
       userCode: wire.user_code,
       waitToken: () => tokenPromise,
       cancel: () => {

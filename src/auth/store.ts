@@ -20,10 +20,10 @@ import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'muse'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity']
+export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity', 'muse']
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -104,6 +104,26 @@ export interface AntigravitySession {
   scopes?: string
 }
 
+/**
+ * Stored Meta Muse Code subscription session. Like Copilot, two credentials
+ * are at play: the Meta OIDC identity token from the device flow is kept in
+ * `refreshToken`, and `accessToken` carries the Model API key (`LLM|…`)
+ * minted from it at `api.meta.ai/muse-code/key`. Minting is idempotent (the
+ * same key comes back while it is valid), so a "refresh" is a re-mint.
+ */
+export interface MuseSession {
+  /** Model API key; sent as the bearer on api.meta.ai/v1. */
+  accessToken: string
+  /** Meta OIDC identity token (`dca:…`) from the device flow. */
+  refreshToken: string
+  /** Epoch milliseconds after which the key is re-minted. */
+  expiresAt: number
+  /** Meta account email, for the status display. */
+  account?: string
+  /** Subscription tier name the mint response reported. */
+  plan?: string
+}
+
 /** One provider's accounts: account key → session, plus the default account. */
 export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
@@ -120,10 +140,11 @@ export interface SessionMap {
   grok?: ProviderAccounts<GrokSession>
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
+  muse?: ProviderAccounts<MuseSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
-export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession
+export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession | MuseSession
 
 /** The session type one provider stores. */
 export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
@@ -169,6 +190,8 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+    case 'muse':
+      return (session as MuseSession).account ?? tokenHash(session.refreshToken)
   }
 }
 

@@ -34,7 +34,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'muse'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -124,7 +124,7 @@ export interface ProxyTestResult {
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
   authorizeUrl: string
-  /** Device-flow providers (copilot): the code the user types at authorizeUrl. */
+  /** Device-flow providers (copilot, muse): the code the user types or confirms at authorizeUrl. */
   userCode?: string
 }
 
@@ -149,6 +149,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
+  { id: 'muse', name: 'Muse Code (Meta)' },
 ]
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
@@ -458,7 +459,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', muse: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -1030,7 +1031,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
             {busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
-                <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
+                <span style={styles.statusLine}>{t(id === 'muse' ? 'museDeviceCodePrompt' : 'deviceCodePrompt')}</span>
                 <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
                 <div style={styles.actions}>
                   <button type="button" onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
@@ -1040,7 +1041,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     type="button"
                     onClick={() => { window.open(deviceCode.verificationUrl, '_blank', 'noopener') }}
                   >
-                    {t('deviceCodeOpenPage')}
+                    {t(id === 'muse' ? 'museDeviceCodeOpenPage' : 'deviceCodeOpenPage')}
                   </button>
                 </div>
               </div>

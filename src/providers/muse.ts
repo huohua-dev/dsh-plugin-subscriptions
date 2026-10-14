@@ -23,7 +23,7 @@
  */
 
 import { arch, platform } from 'node:os'
-import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -322,26 +322,78 @@ interface MuseCatalogMeta {
 /**
  * Meta gates the model catalog on the caller's network: from some egress IPs
  * (commercial proxy exits among them) it answers an empty list on every call,
- * while the same key lists every model from another network. Inference is not
- * gated the same way (see {@link MUSE_MODEL_NOT_FOUND_HINT}), so the built-in
- * catalog serves instead.
+ * while the same key lists every model from another network. Inference from
+ * such a network is refused for some models some of the time (see
+ * {@link MUSE_BLOCKED_NETWORK_HINT}); the built-in catalog serves the picker.
  */
 export const MUSE_NETWORK_HINT = 'Meta returns an empty model catalog to some networks (the same account lists '
   + 'its models from another egress); the built-in Muse catalog is used instead'
 
 /**
- * Meta's Responses gateway intermittently answers 404 `model_not_found` for
- * models the account is entitled to: the same key and request succeed moments
- * later (observed from every network, far more often from some proxy exits).
+ * Why an entitled model answers 404 `model_not_found` (live-verified with one
+ * key across two egresses): a network Meta blocks (its catalog is empty there)
+ * gets the 404, and every such rejection makes Meta refuse that model for the
+ * whole account on every network — the Muse CLI on a clean VPS included — for
+ * a few minutes, intermittently (about 3 minutes after a dozen rejections).
+ * Catalog reads and served requests from the blocked network do not poison.
  */
-export const MUSE_MODEL_NOT_FOUND_HINT = 'Meta intermittently answers model_not_found for models this subscription includes; '
-  + 'it is retried automatically. If it keeps failing, route api.meta.ai through another network'
+export const MUSE_MODEL_NOT_FOUND_HINT = 'Meta refuses this model for the account for a few minutes after requests from '
+  + 'a network it blocks (from any device or client using this account); it was retried automatically and recovers '
+  + 'once only unblocked networks are used'
+
+/** Error code of a request refused because this network is blocked (not retried, does not park a pool member). */
+export const MUSE_NETWORK_BLOCKED_CODE = 'MUSE_NETWORK_BLOCKED'
+
+/** Explanation attached to {@link MUSE_NETWORK_BLOCKED_CODE} failures. */
+export const MUSE_BLOCKED_NETWORK_HINT = 'Meta is blocking Muse on this network: its model catalog is empty here and '
+  + 'the model was refused. Each refused request also makes Meta refuse the model for this account on other networks '
+  + 'and devices (the Muse CLI included) for a few minutes, so it is not retried. Route api.meta.ai through another '
+  + 'network (another proxy exit, a VPS, or the plugin proxy setting)'
 
 /** A 404 body naming a missing model (Responses and Messages wire spellings). */
 const MUSE_MODEL_NOT_FOUND = /model_not_found|model not found or access denied/i
 
-/** Waits between retries of a transient `model_not_found` (five retries, ~10 s worst case). */
-export const MUSE_MODEL_NOT_FOUND_BACKOFF_MS: readonly number[] = [500, 1000, 2000, 3000, 4000]
+/** Waits between retries of a `model_not_found` on an unblocked network (three retries, ~7 s). */
+export const MUSE_MODEL_NOT_FOUND_BACKOFF_MS: readonly number[] = [1000, 2000, 4000]
+
+/**
+ * After a blocked network was seen, requests within this window re-check the
+ * catalog before sending, so manual retries from the same network fail fast
+ * instead of poisoning the account again.
+ */
+const MUSE_BLOCKED_RECHECK_MS = 5 * 60_000
+
+/**
+ * Whether Meta answers this network an empty catalog (the blocked-network
+ * signal). Reading the catalog does not poison the account.
+ * @returns true for an empty list, false for a populated one, undefined when
+ *   the probe itself failed (unknown).
+ */
+export async function museCatalogEmpty(
+  session: MuseSession,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<boolean | undefined> {
+  try {
+    const response = await fetchFn(MUSE_MODELS_URL, {
+      headers: {
+        'authorization': `Bearer ${session.accessToken}`,
+        'accept': 'application/json',
+        'x-client-id': 'tbh:exec',
+        'user-agent': museUserAgent(),
+      },
+      ...signal === undefined ? {} : { signal },
+    })
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined)
+      return undefined
+    }
+    const payload = await response.json() as { data?: unknown }
+    return Array.isArray(payload.data) ? payload.data.length === 0 : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /** Sleep for `ms`, rejecting early when the signal aborts. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -504,7 +556,10 @@ export function museRequestBody(
   }
 }
 
-/** Request headers presenting a headless Muse CLI run. */
+/**
+ * Request headers presenting a headless Muse CLI run. No DSH attribution:
+ * its only header is a `user-agent`, which would replace the Muse CLI's.
+ */
 export function museHeaders(apiKey: string, sessionId: string | undefined): Record<string, string> {
   const session = deterministicSessionId(sessionId)
   return {
@@ -516,7 +571,6 @@ export function museHeaders(apiKey: string, sessionId: string | undefined): Reco
     'x-tbh-session-id': session,
     'x-meta-ai-gateway-session-id': session,
     'x-tbh-agent-role': 'main',
-    ...attributionHeaders(),
   }
 }
 
@@ -545,6 +599,8 @@ export interface MuseAdapterOptions {
   rateLimit?: RateLimitWait
   /** Waits between retries of a transient `model_not_found` (tests shorten it). */
   modelNotFoundBackoffMs?: readonly number[]
+  /** Clock for the blocked-network recheck window (tests advance it). */
+  now?: () => number
 }
 
 /** Muse wire adapter: one instance serves the `muse` provider route. */
@@ -555,6 +611,8 @@ export class MuseAdapter extends LlmAdapter {
   private readonly invalidatedAccounts = new Set<string>()
   private catalogOwner: string | undefined
   private warnedEmptyCatalog = false
+  /** Account + model → when a request was last refused on a blocked network. */
+  private readonly blockedAt = new Map<string, number>()
 
   constructor(private readonly options: MuseAdapterOptions) {
     super()
@@ -563,6 +621,22 @@ export class MuseAdapter extends LlmAdapter {
 
   private get fetchFn(): FetchFn {
     return this.options.fetchFn ?? proxiedFetch
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)()
+  }
+
+  /**
+   * The non-retryable failure of a request on a blocked network: refused by
+   * Meta (`sent`, an HTTP 404) or held back by the pre-send check.
+   */
+  private blockedNetwork(blockKey: string, sent: boolean): LlmError {
+    this.blockedAt.set(blockKey, this.now())
+    const lead = sent
+      ? 'muse API error (HTTP 404): model_not_found'
+      : 'muse request not sent: the model catalog is still empty on this network'
+    return new LlmError(`${lead}. ${MUSE_BLOCKED_NETWORK_HINT}`, MUSE_NETWORK_BLOCKED_CODE, sent ? { status: 404 } : {})
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
@@ -764,12 +838,29 @@ export class MuseAdapter extends LlmAdapter {
         return response
       }
       const backoff = this.options.modelNotFoundBackoffMs ?? MUSE_MODEL_NOT_FOUND_BACKOFF_MS
+      // A refused request from a blocked network poisons the model for the
+      // whole account (other networks and devices too), so once one was seen,
+      // check the network before sending again instead of re-poisoning it.
+      // Keyed per model: a blocked network may still serve another model.
+      const blockKey = `${accountKey ?? ''}\u0000${options.model}`
+      const blockedSince = this.blockedAt.get(blockKey)
+      if (blockedSince !== undefined && this.now() - blockedSince < MUSE_BLOCKED_RECHECK_MS) {
+        if (await museCatalogEmpty(session, this.fetchFn, watchdog.signal) === true) {
+          throw this.blockedNetwork(blockKey, false)
+        }
+        this.blockedAt.delete(blockKey)
+      }
       let response = await send()
       let modelNotFound = false
       for (let attempt = 0; response.status === 404; attempt++) {
         // Body read once here; a rebuilt Response carries it to the error path.
         const text = await response.text().catch(() => '')
         modelNotFound = MUSE_MODEL_NOT_FOUND.test(text)
+        if (modelNotFound && attempt === 0 && await museCatalogEmpty(session, this.fetchFn, watchdog.signal) === true) {
+          // Blocked network: retrying only spreads the refusal to the account's
+          // other networks, so fail now (not retried, no pool cooldown).
+          throw this.blockedNetwork(blockKey, true)
+        }
         if (!modelNotFound || attempt >= backoff.length) {
           response = new Response(text, { status: 404, statusText: response.statusText, headers: response.headers })
           break
@@ -783,10 +874,11 @@ export class MuseAdapter extends LlmAdapter {
           ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
         })
         if (modelNotFound) {
-          // Transient on Meta's side (the same request succeeds moments later
-          // from the same network): report it as a server failure so the
-          // harness retries and a pool does not park the account, and name
-          // the cause instead of suggesting the model or account is wrong.
+          // This network lists the catalog, so the account is still poisoned
+          // by earlier refusals on a blocked network; that clears within
+          // minutes. Report a server failure — the harness keeps retrying and
+          // a pool does not park the account — and name the cause instead of
+          // suggesting the model or account is wrong.
           throw new LlmError(
             `${error.message}. ${MUSE_MODEL_NOT_FOUND_HINT} (still failing after ${String(backoff.length + 1)} attempts)`,
             'SERVER',

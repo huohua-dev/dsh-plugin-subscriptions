@@ -12,11 +12,14 @@ import {
   MUSE_API_URL,
   MUSE_CLIENT_ID,
   MUSE_KEY_URL,
+  MUSE_MODELS_URL,
+  MUSE_NETWORK_BLOCKED_CODE,
   MuseAdapter,
   completeMuseLogin,
   fetchMuseModels,
   isMusePermanentRefreshError,
   museDeviceFlow,
+  museHeaders,
   museModelName,
   museReasoningIndex,
   museRequestBody,
@@ -190,6 +193,9 @@ test('fetchMuseModels reads the muse-code catalog and treats an empty list as a 
 test('museUserAgent presents a headless Muse CLI build', () => {
   assert.equal(museUserAgent('darwin', 'arm64'), 'muse-build/1.4.7 (non-interactive; macos-aarch64)')
   assert.equal(museUserAgent('linux', 'x64'), 'muse-build/1.4.7 (non-interactive; linux-x86_64)')
+  // DSH attribution must not replace the CLI user agent on inference calls.
+  assert.equal(museHeaders('key', 's1')['user-agent'], museUserAgent())
+  assert.equal(museHeaders('key', 's1')['x-meta-ai-gateway-session-id'], museHeaders('key', 's1')['x-tbh-session-id'])
 })
 
 const USER = {
@@ -360,26 +366,78 @@ test('a gated network falls back to the static catalog with one warning; a persi
   assert.equal(info.context?.contextWindow, 1_007_997)
   assert.deepEqual(info.inputModalities, ['text', 'image'])
 
-  const notFound = recordingFetch(() =>
-    json({ error: { code: 'model_not_found', message: 'The requested model was not found.' } }, 404))
+  // A network that lists the catalog: the 404 is the account still poisoned
+  // from elsewhere, retried in place and then handed to the harness.
+  const notFound = recordingFetch(url => url === MUSE_MODELS_URL
+    ? json({ object: 'list', data: [{ id: 'muse-spark-1.3' }] })
+    : json({ error: { code: 'model_not_found', message: 'The requested model was not found.' } }, 404))
   await assert.rejects(
     collect(museAdapter(notFound.fetchFn).stream({ provider: 'muse', model: 'muse-spark-1.3', messages: [USER] } as unknown as GenerateOptions)),
     (error: Error & { code?: string }) => error.code === 'SERVER'
-      && /intermittently answers model_not_found/.test(error.message) && /after 3 attempts/.test(error.message),
+      && /refuses this model for the account/.test(error.message) && /after 3 attempts/.test(error.message),
   )
-  assert.equal(notFound.calls.length, 3, 'two backoff retries after the first attempt')
+  assert.equal(notFound.calls.filter(call => call.url === MUSE_API_URL).length, 3, 'two backoff retries after the first attempt')
+  assert.equal(notFound.calls.filter(call => call.url === MUSE_MODELS_URL).length, 1, 'the network is checked once')
 })
 
+const MODEL_NOT_FOUND = { error: { code: 'model_not_found', message: 'The requested model was not found.' } }
+
 test('a transient model_not_found is retried until the gateway serves the model', async () => {
-  const { calls, fetchFn } = recordingFetch((_url, _init, index) => index < 2
-    ? json({ error: { code: 'model_not_found', message: 'The requested model was not found.' } }, 404)
-    : sse(TEXT_EVENTS))
+  let inference = 0
+  const { calls, fetchFn } = recordingFetch(url => {
+    if (url === MUSE_MODELS_URL) return json({ object: 'list', data: [{ id: 'muse-wonder-1.0' }] })
+    return inference++ < 2 ? json(MODEL_NOT_FOUND, 404) : sse(TEXT_EVENTS)
+  })
   const chunks = await collect(museAdapter(fetchFn).stream({
     provider: 'muse', model: 'muse-wonder-1.0', messages: [USER],
   } as unknown as GenerateOptions))
-  assert.equal(calls.length, 3)
+  assert.equal(calls.filter(call => call.url === MUSE_API_URL).length, 3)
   const finish = chunks.at(-1)
   assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop')
+})
+
+test('a model_not_found on a blocked network fails at once and later requests check the network before sending', async () => {
+  let catalog: unknown[] = []
+  let clock = 1_000_000
+  const { calls, fetchFn } = recordingFetch(url => url === MUSE_MODELS_URL
+    ? json({ object: 'list', data: catalog })
+    : catalog.length === 0 ? json(MODEL_NOT_FOUND, 404) : sse(TEXT_EVENTS))
+  const adapter = new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens({ accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }),
+    discovery: false,
+    fetchFn,
+    modelNotFoundBackoffMs: [1, 1],
+    now: () => clock,
+  })
+  const request = { provider: 'muse', model: 'muse-spark-1.3', messages: [USER] } as unknown as GenerateOptions
+  const blocked = (error: Error & { code?: string; failure?: { status?: number } }) =>
+    error.code === MUSE_NETWORK_BLOCKED_CODE && /blocking Muse on this network/.test(error.message)
+  const sent = () => calls.filter(call => call.url === MUSE_API_URL).length
+
+  await assert.rejects(collect(adapter.stream(request)), blocked)
+  assert.equal(sent(), 1, 'no retry from a blocked network: each refusal poisons the account elsewhere')
+
+  await assert.rejects(collect(adapter.stream(request)), blocked)
+  assert.equal(sent(), 1, 'a repeat within the window is refused before anything is sent')
+
+  await assert.rejects(collect(adapter.stream({ ...request, model: 'muse-wonder-1.0' } as GenerateOptions)), blocked)
+  assert.equal(sent(), 2, 'the hold is per model: a blocked network may still serve another one')
+
+  catalog = [{ id: 'muse-spark-1.3' }]
+  const chunks = await collect(adapter.stream(request))
+  assert.equal(chunks.at(-1)?.type, 'finish', 'an unblocked network sends again')
+  assert.equal(sent(), 3)
+
+  catalog = []
+  clock += 10 * 60_000
+  await assert.rejects(collect(adapter.stream(request)), blocked)
+  const probesBefore = calls.filter(call => call.url === MUSE_MODELS_URL).length
+  clock += 10 * 60_000
+  await assert.rejects(collect(adapter.stream(request)), blocked)
+  assert.equal(sent(), 5, 'past the window the request is sent (and refused) again')
+  assert.equal(calls.filter(call => call.url === MUSE_MODELS_URL).length, probesBefore + 1, 'only the post-404 check runs')
 })
 
 test('an unrelated 404 is not retried', async () => {

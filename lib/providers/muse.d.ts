@@ -134,19 +134,33 @@ export declare function museModelName(id: string): string;
 /**
  * Meta gates the model catalog on the caller's network: from some egress IPs
  * (commercial proxy exits among them) it answers an empty list on every call,
- * while the same key lists every model from another network. Inference is not
- * gated the same way (see {@link MUSE_MODEL_NOT_FOUND_HINT}), so the built-in
- * catalog serves instead.
+ * while the same key lists every model from another network. Inference from
+ * such a network is refused for some models some of the time (see
+ * {@link MUSE_BLOCKED_NETWORK_HINT}); the built-in catalog serves the picker.
  */
 export declare const MUSE_NETWORK_HINT: string;
 /**
- * Meta's Responses gateway intermittently answers 404 `model_not_found` for
- * models the account is entitled to: the same key and request succeed moments
- * later (observed from every network, far more often from some proxy exits).
+ * Why an entitled model answers 404 `model_not_found` (live-verified with one
+ * key across two egresses): a network Meta blocks (its catalog is empty there)
+ * gets the 404, and every such rejection makes Meta refuse that model for the
+ * whole account on every network — the Muse CLI on a clean VPS included — for
+ * a few minutes, intermittently (about 3 minutes after a dozen rejections).
+ * Catalog reads and served requests from the blocked network do not poison.
  */
 export declare const MUSE_MODEL_NOT_FOUND_HINT: string;
-/** Waits between retries of a transient `model_not_found` (five retries, ~10 s worst case). */
+/** Error code of a request refused because this network is blocked (not retried, does not park a pool member). */
+export declare const MUSE_NETWORK_BLOCKED_CODE = "MUSE_NETWORK_BLOCKED";
+/** Explanation attached to {@link MUSE_NETWORK_BLOCKED_CODE} failures. */
+export declare const MUSE_BLOCKED_NETWORK_HINT: string;
+/** Waits between retries of a `model_not_found` on an unblocked network (three retries, ~7 s). */
 export declare const MUSE_MODEL_NOT_FOUND_BACKOFF_MS: readonly number[];
+/**
+ * Whether Meta answers this network an empty catalog (the blocked-network
+ * signal). Reading the catalog does not poison the account.
+ * @returns true for an empty list, false for a populated one, undefined when
+ *   the probe itself failed (unknown).
+ */
+export declare function museCatalogEmpty(session: MuseSession, fetchFn?: FetchFn, signal?: AbortSignal): Promise<boolean | undefined>;
 /**
  * Fetch the live model catalog the Muse CLI uses. Hidden entries and models
  * that cannot chat (image generation, voice) are dropped. An empty list from a
@@ -184,7 +198,10 @@ export declare function museReasoningIndex(messages: GenerateOptions['messages']
  * requested so tool round trips can replay it.
  */
 export declare function museRequestBody(options: GenerateOptions, resolved: ResponsesRequestInput): Record<string, unknown>;
-/** Request headers presenting a headless Muse CLI run. */
+/**
+ * Request headers presenting a headless Muse CLI run. No DSH attribution:
+ * its only header is a `user-agent`, which would replace the Muse CLI's.
+ */
 export declare function museHeaders(apiKey: string, sessionId: string | undefined): Record<string, string>;
 /** Constructor dependencies for {@link MuseAdapter}. */
 export interface MuseAdapterOptions {
@@ -211,6 +228,8 @@ export interface MuseAdapterOptions {
     rateLimit?: RateLimitWait;
     /** Waits between retries of a transient `model_not_found` (tests shorten it). */
     modelNotFoundBackoffMs?: readonly number[];
+    /** Clock for the blocked-network recheck window (tests advance it). */
+    now?: () => number;
 }
 /** Muse wire adapter: one instance serves the `muse` provider route. */
 export declare class MuseAdapter extends LlmAdapter {
@@ -221,8 +240,16 @@ export declare class MuseAdapter extends LlmAdapter {
     private readonly invalidatedAccounts;
     private catalogOwner;
     private warnedEmptyCatalog;
+    /** Account + model → when a request was last refused on a blocked network. */
+    private readonly blockedAt;
     constructor(options: MuseAdapterOptions);
     private get fetchFn();
+    private now;
+    /**
+     * The non-retryable failure of a request on a blocked network: refused by
+     * Meta (`sent`, an HTTP 404) or held back by the pre-send check.
+     */
+    private blockedNetwork;
     private fetchCatalog;
     /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
     clearAccountCatalog(account?: string): void;

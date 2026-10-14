@@ -2,18 +2,26 @@
 export interface DeviceFlowSpec {
     /** OAuth App / GitHub App client id the device code is requested for. */
     clientId: string;
-    /** Scope string requested at device-code time. */
-    scope: string;
+    /** Scope string requested at device-code time; omitted from the request when absent. */
+    scope?: string;
     /** Device-code endpoint (e.g. `https://github.com/login/device/code`). */
     deviceCodeUrl: string;
     /** Token polling endpoint (e.g. `https://github.com/login/oauth/access_token`). */
     tokenUrl: string;
+    /** Extra headers sent on both device-flow endpoints (e.g. a client user agent). */
+    headers?: Record<string, string>;
+    /** Brand named in the access-denied message (default: the provider route). */
+    brand?: string;
     /** Fetch implementation (injectable for tests). */
     fetchFn?: typeof fetch;
 }
 /** One in-flight device-flow login attempt. */
 export interface DeviceAttempt {
-    /** URL the user opens to authorize (e.g. `https://github.com/login/device`). */
+    /**
+     * URL the user opens to authorize (e.g. `https://github.com/login/device`).
+     * The server's `verification_uri_complete` wins when it sent one: that page
+     * already carries the code, so the user only confirms it.
+     */
     readonly verificationUrl: string;
     /** Short code the user types at the verification URL. */
     readonly userCode: string;

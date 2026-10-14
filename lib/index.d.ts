@@ -1,6 +1,6 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity) on `ctx.llm`, and expose the `/subscriptions-auth`
+ * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity, Meta Muse Code) on `ctx.llm`, and expose the `/subscriptions-auth`
  * RPC channel the web Settings page uses to run the logins. The token store
  * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
  * a host `connection` service exists, so headless compositions load fine.
@@ -19,7 +19,7 @@ import type { AntigravityRuntimeConfig } from './providers/antigravity.js';
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js';
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js';
 export type { ProviderStatus } from './auth/rpc.js';
-export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js';
+export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, MuseSession, ProviderId } from './auth/store.js';
 export declare const name = "dsh-plugin-subscriptions";
 export declare const inject: string[];
 /** Default maximum provider idle time while one stream read is outstanding. */
@@ -52,6 +52,7 @@ export interface Config {
         grok?: ModelEntry[];
         copilot?: ModelEntry[];
         antigravity?: ModelEntry[];
+        muse?: ModelEntry[];
     };
     /** Antigravity-specific OAuth and endpoint configuration. */
     antigravity?: AntigravityRuntimeConfig & {

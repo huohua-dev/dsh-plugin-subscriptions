@@ -2,7 +2,7 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client';
 import type { SubscriptionsKey } from './locales.js';
 export { callSubscriptionsAuth } from './subscriptions-rpc.js';
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity';
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'muse';
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
     key: string;

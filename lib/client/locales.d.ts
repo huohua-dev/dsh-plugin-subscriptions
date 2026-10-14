@@ -79,6 +79,8 @@ export declare const en: {
     deviceCodeCopy: string;
     deviceCodeCopied: string;
     deviceCodeOpenPage: string;
+    museDeviceCodePrompt: string;
+    museDeviceCodeOpenPage: string;
     usageTitle: string;
     usageRefresh: string;
     usageLoading: string;
@@ -262,6 +264,8 @@ export declare const zh: {
     deviceCodeCopy: string;
     deviceCodeCopied: string;
     deviceCodeOpenPage: string;
+    museDeviceCodePrompt: string;
+    museDeviceCodeOpenPage: string;
     usageTitle: string;
     usageRefresh: string;
     usageLoading: string;

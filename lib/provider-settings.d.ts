@@ -5,6 +5,7 @@ export declare const PROVIDER_TOOLS: {
     readonly grok: readonly ["image_generate", "video_generate", "x_search"];
     readonly copilot: readonly [];
     readonly antigravity: readonly [];
+    readonly muse: readonly [];
 };
 export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search';
 /** Mirrors `PromptCacheTtl` in translate/anthropic.ts; kept here so the client bundle needs no translate import. */

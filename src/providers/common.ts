@@ -14,6 +14,7 @@ import {
   QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
+import { describeFetchError } from '../http.js'
 import { durationMs, earliestReset, rateLimitDiagnostics, resetInstantFromHeader, retryAfterInstant, waitFromReset } from './rate-limit.js'
 import type { RateLimitResetReader } from './rate-limit.js'
 import { isSubscriptionQuotaExceeded } from './quota.js'
@@ -252,7 +253,10 @@ export function idleWatchdog(caller: AbortSignal | undefined, timeoutMs: number)
 /**
  * Classify a thrown fetch failure. Caller cancellation maps to ABORTED, idle
  * expiry to TIMEOUT, and everything else (DNS, TLS, refused connection) to
- * TRANSPORT with the cause chained.
+ * TRANSPORT with the cause chained. The cause is also spelled out in the
+ * message (`fetch failed → other side closed (UND_ERR_SOCKET)`): the harness
+ * and the pool show only the message, and undici's bare "fetch failed" says
+ * nothing about which layer broke.
  * @param label - diagnostic prefix naming the provider API.
  * @param error - the thrown value.
  * @param watchdog - the request's idle watchdog.
@@ -268,7 +272,8 @@ export function mapFetchFailure(
   if (watchdog.timedOut()) return new LlmError(`${label} stream idle timeout`, 'TIMEOUT', { cause: error })
   if (caller?.aborted === true) return new LlmError(`${label} request aborted by caller`, 'ABORTED', { cause: error })
   if (error instanceof LlmError) return error
-  return new LlmError(`${label} request failed`, 'TRANSPORT', { cause: error })
+  const detail = describeFetchError(error)
+  return new LlmError(`${label} request failed${detail === '' ? '' : `: ${detail}`}`, 'TRANSPORT', { cause: error })
 }
 
 /** OAuth token-endpoint failure carrying the provider's `error` code when it sent one. */

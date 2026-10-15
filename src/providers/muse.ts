@@ -37,8 +37,8 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { DeviceFlowSpec } from '../auth/device-flow.js'
 import type { MuseSession, ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
-import { resolveImages } from '../translate/resolved.js'
-import type { TranslatableMessage } from '../translate/resolved.js'
+import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
+import type { ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ReasoningReplayItem, ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
 import {
@@ -99,6 +99,27 @@ export const MUSE_PREEMPT_MS = 5 * 60_000
 const MUSE_CONTEXT_WINDOW = 1_007_997
 /** The Muse CLI's own per-request output cap; Muse reasons heavily before any text. */
 const MUSE_DEFAULT_MAX_TOKENS = 128_000
+
+/**
+ * Cap on each image a Muse request carries. Every step resends the whole
+ * history with its images inline, so they pile up: a session holding twenty
+ * 1440×704 frame strips stored as 1.2–1.8 MB PNGs sent 31 MB of base64 on
+ * every step. Meta starts the stream only after it has read and processed
+ * every image (seconds per image), and through a proxied link 3 of 7 such
+ * requests had the connection closed before the stream started (undici
+ * `other side closed`), which surfaced as TRANSPORT failures. Over this cap an
+ * image is re-encoded by the host (JPEG q85 for opaque images; the stored
+ * attachment is untouched): the same history became 5.4 MB, and 7 of 7
+ * requests on the same link succeeded.
+ */
+export const MUSE_IMAGE_LIMIT: ImageRequestLimit = { maxEdge: 2000, maxBytes: 1_000_000 }
+
+/**
+ * Inline image data a Muse request may carry, in base64 bytes. Past it the
+ * host offloads the oldest images to text and retries, so a long image-heavy
+ * session cannot grow the upload without bound.
+ */
+export const MUSE_REQUEST_IMAGE_BUDGET = 10 * 1024 * 1024
 
 /**
  * Efforts the Responses endpoint accepts, in display order (live-verified:
@@ -997,7 +1018,19 @@ export class MuseAdapter extends LlmAdapter {
     try {
       const accountKey = account ?? await this.options.tokens.defaultAccount()
       let session = await this.options.tokens.session(account)
-      const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
+      const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal, MUSE_IMAGE_LIMIT)
+      if (hostSupportsImageOffload()) {
+        const offloadImages = requiredImageOffloadCount(messages, MUSE_REQUEST_IMAGE_BUDGET)
+        if (offloadImages > 0) {
+          // Older dsh-llm option types lack `offloadImages`; 0.2+ hosts read it.
+          throw new LlmError(
+            `muse request images exceed the ${String(MUSE_REQUEST_IMAGE_BUDGET)}-byte base64 budget; `
+            + `${String(offloadImages)} more oldest image(s) must be offloaded`,
+            IMAGE_OFFLOAD_REQUIRED,
+            { offloadImages } as ErrorOptions,
+          )
+        }
+      }
       const replay = museReasoningIndex(options.messages, options.provider, options.model, accountKey)
       let replaying = replay.size > 0
       const bodyOf = (history: readonly TranslatableMessage[]) => (): string => JSON.stringify(museRequestBody(

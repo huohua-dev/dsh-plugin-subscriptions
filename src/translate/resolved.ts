@@ -79,7 +79,7 @@ export interface TranslatableMessage {
 export interface ImageRequestLimit {
   /** Longest edge in pixels an image may be sent at. */
   maxEdge: number
-  /** Encoded-byte target before base64 expansion. */
+  /** Encoded-byte target before base64 expansion; a larger stored image is re-encoded even within `maxEdge`. */
   maxBytes: number
 }
 
@@ -131,16 +131,22 @@ export function requiredImageOffloadCount(messages: readonly TranslatableMessage
 
 /**
  * The request projection for one oversized image, or undefined when it fits.
- * Hosts before DSH 0.1.7 read a pixel budget (`maxPixels`), later ones the
- * target edges (`width`/`height`); each validates only its own fields, so
- * one projection carries both.
+ * An image over the edge cap is downscaled to it; one within the edge cap but
+ * over the byte cap keeps its size and is only re-encoded (the host passes a
+ * target at the source size through when the bytes already fit, and otherwise
+ * walks its JPEG/WebP quality ladder). Hosts before DSH 0.1.7 read a pixel
+ * budget (`maxPixels`), later ones the target edges (`width`/`height`); each
+ * validates only its own fields, so one projection carries both.
  */
 export function imageRequestTarget(
-  ref: { width: number; height: number },
+  ref: { width: number; height: number; bytes?: number },
   limit: ImageRequestLimit,
 ): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
   const longEdge = Math.max(ref.width, ref.height)
-  if (!(longEdge > limit.maxEdge)) return undefined
+  if (!(longEdge > limit.maxEdge)) {
+    if (!(typeof ref.bytes === 'number' && ref.bytes > limit.maxBytes)) return undefined
+    return { width: ref.width, height: ref.height, maxPixels: ref.width * ref.height, maxBytes: limit.maxBytes }
+  }
   const short = (edge: number): number => Math.max(1, Math.floor(edge * limit.maxEdge / longEdge))
   const width = ref.width >= ref.height ? limit.maxEdge : short(ref.width)
   const height = ref.width >= ref.height ? short(ref.height) : limit.maxEdge

@@ -80,7 +80,10 @@ export declare function idleWatchdog(caller: AbortSignal | undefined, timeoutMs:
 /**
  * Classify a thrown fetch failure. Caller cancellation maps to ABORTED, idle
  * expiry to TIMEOUT, and everything else (DNS, TLS, refused connection) to
- * TRANSPORT with the cause chained.
+ * TRANSPORT with the cause chained. The cause is also spelled out in the
+ * message (`fetch failed → other side closed (UND_ERR_SOCKET)`): the harness
+ * and the pool show only the message, and undici's bare "fetch failed" says
+ * nothing about which layer broke.
  * @param label - diagnostic prefix naming the provider API.
  * @param error - the thrown value.
  * @param watchdog - the request's idle watchdog.

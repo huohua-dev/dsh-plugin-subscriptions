@@ -44,7 +44,7 @@ export interface TranslatableMessage {
 export interface ImageRequestLimit {
     /** Longest edge in pixels an image may be sent at. */
     maxEdge: number;
-    /** Encoded-byte target before base64 expansion. */
+    /** Encoded-byte target before base64 expansion; a larger stored image is re-encoded even within `maxEdge`. */
     maxBytes: number;
 }
 /**
@@ -70,13 +70,17 @@ export declare function hostSupportsImageOffload(): boolean;
 export declare function requiredImageOffloadCount(messages: readonly TranslatableMessage[], maxBase64Bytes: number): number;
 /**
  * The request projection for one oversized image, or undefined when it fits.
- * Hosts before DSH 0.1.7 read a pixel budget (`maxPixels`), later ones the
- * target edges (`width`/`height`); each validates only its own fields, so
- * one projection carries both.
+ * An image over the edge cap is downscaled to it; one within the edge cap but
+ * over the byte cap keeps its size and is only re-encoded (the host passes a
+ * target at the source size through when the bytes already fit, and otherwise
+ * walks its JPEG/WebP quality ladder). Hosts before DSH 0.1.7 read a pixel
+ * budget (`maxPixels`), later ones the target edges (`width`/`height`); each
+ * validates only its own fields, so one projection carries both.
  */
 export declare function imageRequestTarget(ref: {
     width: number;
     height: number;
+    bytes?: number;
 }, limit: ImageRequestLimit): {
     width: number;
     height: number;

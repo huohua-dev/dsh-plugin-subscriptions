@@ -26,6 +26,7 @@ import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelIn
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { DeviceFlowSpec } from '../auth/device-flow.js';
 import type { MuseSession } from '../auth/store.js';
+import type { ImageRequestLimit } from '../translate/resolved.js';
 import type { ReasoningReplayItem, ResponsesRequestInput } from '../translate/responses.js';
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage } from './common.js';
 import { AccountTokenManager } from './accounts.js';
@@ -50,6 +51,25 @@ export declare const MUSE_CLI_VERSION = "1.4.7";
 export declare const MUSE_KEY_TTL_MS: number;
 /** Refresh when the key has less than this much of its assumed life left. */
 export declare const MUSE_PREEMPT_MS: number;
+/**
+ * Cap on each image a Muse request carries. Every step resends the whole
+ * history with its images inline, so they pile up: a session holding twenty
+ * 1440×704 frame strips stored as 1.2–1.8 MB PNGs sent 31 MB of base64 on
+ * every step. Meta starts the stream only after it has read and processed
+ * every image (seconds per image), and through a proxied link 3 of 7 such
+ * requests had the connection closed before the stream started (undici
+ * `other side closed`), which surfaced as TRANSPORT failures. Over this cap an
+ * image is re-encoded by the host (JPEG q85 for opaque images; the stored
+ * attachment is untouched): the same history became 5.4 MB, and 7 of 7
+ * requests on the same link succeeded.
+ */
+export declare const MUSE_IMAGE_LIMIT: ImageRequestLimit;
+/**
+ * Inline image data a Muse request may carry, in base64 bytes. Past it the
+ * host offloads the oldest images to text and retries, so a long image-heavy
+ * session cannot grow the upload without bound.
+ */
+export declare const MUSE_REQUEST_IMAGE_BUDGET: number;
 /** Reads the reset instant of a rejected Meta window from the error body. */
 export declare const museRateLimitReset: RateLimitResetReader;
 /** User agent of a headless Muse CLI run on this machine. */

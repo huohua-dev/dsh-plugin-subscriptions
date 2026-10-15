@@ -384,6 +384,20 @@ test('a gated network falls back to the static catalog with one warning; a persi
   assert.equal(notFound.calls.filter(call => call.url === MUSE_MODELS_URL).length, 1, 'the network is checked once')
 })
 
+test('a connection closed mid-request is a TRANSPORT failure that names the closed socket', async () => {
+  // undici's shape when the far side drops an upload: a bare "fetch failed"
+  // whose cause is the socket error. The pool and harness show only the
+  // message, so the cause must be in it.
+  const closed = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+  const fetchFn = (() => Promise.reject(new TypeError('fetch failed', { cause: closed }))) as typeof fetch
+  await assert.rejects(
+    collect(museAdapter(fetchFn).stream({ provider: 'muse', model: 'muse-spark-1.3', messages: [USER] } as unknown as GenerateOptions)),
+    (error: Error & { code?: string; cause?: unknown }) => error.code === 'TRANSPORT'
+      && error.message === 'muse API request failed: fetch failed → other side closed (UND_ERR_SOCKET)'
+      && error.cause instanceof TypeError,
+  )
+})
+
 const MODEL_NOT_FOUND = { error: { code: 'model_not_found', message: 'The requested model was not found.' } }
 
 test('a transient model_not_found is retried until the gateway serves the model', async () => {

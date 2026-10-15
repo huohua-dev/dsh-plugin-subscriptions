@@ -7,8 +7,9 @@ import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { hostSupportsImageOffload, imageRequestTarget, requiredImageOffloadCount, resolveImages } from '../src/translate/resolved.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
 import { CLAUDE_REQUEST_IMAGE_BUDGET, ClaudeAdapter } from '../src/providers/claude.js'
+import { MUSE_IMAGE_LIMIT, MUSE_REQUEST_IMAGE_BUDGET, MuseAdapter } from '../src/providers/muse.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
-import type { ClaudeSession } from '../src/auth/store.js'
+import type { ClaudeSession, MuseSession } from '../src/auth/store.js'
 import type { CompatibleMessage } from '../src/compat.js'
 
 const LIMIT = { maxEdge: 2000, maxBytes: 3_750_000 }
@@ -83,6 +84,16 @@ test('image request targets fit the long edge and carry both host projection sha
   assert.deepEqual(imageRequestTarget(TALL, LIMIT), { width: 1545, height: 2000, maxPixels: 3_090_000, maxBytes: 3_750_000 })
   assert.equal(imageRequestTarget({ width: 2000, height: 2000 }, LIMIT), undefined)
   assert.equal(imageRequestTarget(SMALL, LIMIT), undefined)
+})
+
+test('an image within the edge cap but over the byte cap is re-encoded at its own size', () => {
+  const heavy = { width: 1440, height: 704, bytes: 1_400_000 }
+  const limit = { maxEdge: 2000, maxBytes: 1_000_000 }
+  assert.deepEqual(imageRequestTarget(heavy, limit), { width: 1440, height: 704, maxPixels: 1_013_760, maxBytes: 1_000_000 })
+  assert.equal(imageRequestTarget({ ...heavy, bytes: 1_000_000 }, limit), undefined, 'at the cap it is sent as stored')
+  assert.equal(imageRequestTarget({ width: 1440, height: 704 }, limit), undefined, 'unknown size is sent as stored')
+  // Over both caps, the edge cap decides the target.
+  assert.deepEqual(imageRequestTarget({ ...WIDE, bytes: 9_000_000 }, LIMIT), imageRequestTarget(WIDE, LIMIT))
 })
 
 test('a limited route sends oversized images downscaled and leaves the rest as stored', async () => {
@@ -211,4 +222,61 @@ test('Claude sends a request whose images fit the budget', async () => {
   const { error, fetches } = await claudeTurn(withImages(...refs), sizedStore(1_000_000))
   assert.equal(fetches, 1)
   assert.notEqual((error as { code?: string }).code, 'IMAGE_OFFLOAD_REQUIRED')
+})
+
+/** Drain one Muse turn whose requests `fetch` answers with HTTP 400, returning the error and sent bodies. */
+async function museTurn(messages: Message[], attachments: unknown): Promise<{ error: unknown; bodies: string[] }> {
+  const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }
+  const tokens = new AccountTokenManager<MuseSession>({
+    provider: 'muse',
+    displayName: 'Test',
+    makeOptions: () => ({ preemptMs: 0, refresh: s => Promise.resolve(s), isPermanent: () => false }),
+    io: {
+      list: () => Promise.resolve([{ key: 'acct', session }]),
+      get: () => Promise.resolve(session),
+      save: () => Promise.resolve(),
+      remove: () => Promise.resolve(),
+    },
+  })
+  const bodies: string[] = []
+  const adapter = new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens,
+    discovery: false,
+    resolveAttachments: () => attachments as never,
+    fetchFn: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body))
+      return new Response('{}', { status: 400 })
+    }) as typeof fetch,
+  })
+  try {
+    for await (const _chunk of adapter.stream({ provider: 'muse', model: 'muse-spark-1.3', messages })) { /* drain */ }
+    return { error: undefined, bodies }
+  } catch (error: unknown) {
+    return { error, bodies }
+  }
+}
+
+test('Muse re-encodes heavy images within the edge cap instead of sending the stored bytes', async () => {
+  // 1440x704 frame strips stored as 1.4MB PNGs: under the edge cap, over the byte cap.
+  const strip = { attachmentId: 'strip', mediaType: 'image/png', bytes: 1_400_000, width: 1440, height: 704 }
+  const { attachments, calls, targets } = store()
+  const { bodies } = await museTurn(withImages(strip, SMALL), attachments)
+  assert.deepEqual(calls, ['request:strip', 'stored:small'])
+  assert.deepEqual(targets, [imageRequestTarget(strip, MUSE_IMAGE_LIMIT)])
+  assert.equal(bodies.length, 1)
+  assert.match(bodies[0]!, /data:image\/jpeg;base64,cw==/)
+})
+
+test('Muse asks the host to offload the oldest images instead of uploading an oversized request', async () => {
+  // 12 images of 1MB raw (~1.33MB base64) total ~16MB, over the 10MiB budget.
+  const raw = 1_000_000
+  const refs = Array.from({ length: 12 }, (_, index) => ({ ...SMALL, attachmentId: `shot${index}`, bytes: raw }))
+  const { error, bodies } = await museTurn(withImages(...refs), sizedStore(raw))
+  assert.equal(bodies.length, 0, 'nothing is sent before the host offloads')
+  const failure = error as Error & { code?: string; failure?: { offloadImages?: number } }
+  assert.equal(failure.code, 'IMAGE_OFFLOAD_REQUIRED')
+  const base64 = Math.ceil(raw / 3) * 4
+  assert.equal(failure.failure?.offloadImages, 12 - Math.floor(MUSE_REQUEST_IMAGE_BUDGET / base64))
 })

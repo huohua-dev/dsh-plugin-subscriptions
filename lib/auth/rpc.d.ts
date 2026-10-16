@@ -72,6 +72,15 @@ export interface ProviderStatus {
     busy: boolean;
     /** Logged-in accounts, default first. */
     accounts: AccountStatus[];
+    /**
+     * The device-flow code the live attempt is waiting on (Copilot, Muse Code).
+     * The page learns it from its own `login` answer, but that answer is lost on
+     * a reload; reporting it here lets the card come back with the attempt.
+     */
+    pendingLogin?: {
+        userCode: string;
+        verificationUrl: string;
+    };
     /** The last login error, shown until the next success. */
     detail?: string;
     /** The CLI version this route presents (Codex, Claude), and where it came from. */

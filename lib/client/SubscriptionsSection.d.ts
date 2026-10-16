@@ -16,6 +16,11 @@ export interface ProviderStatus {
     displayName?: string;
     busy: boolean;
     accounts: AccountStatus[];
+    /** Device-flow code the live attempt waits on, for the code card. */
+    pendingLogin?: {
+        userCode: string;
+        verificationUrl: string;
+    };
     detail?: string;
     /** The CLI version the route presents (Codex, Claude), and where it came from. */
     clientVersion?: {
@@ -89,6 +94,23 @@ export interface SubscriptionsSectionInjected {
  * renderer erases the share boundary at the render call).
  */
 export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>;
+/** A device-flow code the page shows while the attempt waits for it. */
+export interface PendingDeviceCode {
+    /** Short code the user types at (or confirms on) the verification page. */
+    userCode: string;
+    /** Page the user opens to authorize. */
+    verificationUrl: string;
+}
+/**
+ * The device code to render for one provider: what this page learned from its
+ * own `login` answer first, then what the server still reports. The local copy
+ * answers instantly; the reported one is what survives a reload of the
+ * Settings page, after which the local one is gone but the attempt is not.
+ * @param status - the provider's last reported state, possibly absent.
+ * @param local - the code this page received from its own login attempt.
+ * @returns the code to show, or `undefined` when no attempt is waiting.
+ */
+export declare function pendingDeviceCode(status: ProviderStatus | undefined, local: PendingDeviceCode | undefined): PendingDeviceCode | undefined;
 /** The CLI version a route presents, beside the provider name; nothing for routes without one. */
 export declare function ClientVersionTag({ clientVersion, t }: {
     clientVersion: ProviderStatus['clientVersion'];
@@ -153,6 +175,23 @@ export declare function shouldFetchModelDefaults(input: ModelDefaultsFetchInput)
  * @returns a signature string, stable across renders with equal accounts.
  */
 export declare function modelDefaultsSignature(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>): string;
+/**
+ * Whether a provider's login attempt has settled, i.e. nothing is waiting on
+ * the authorization server any more — the poll loop has served its purpose
+ * and the device-code card can go.
+ *
+ * Only `busy` decides this. The server keeps a provider busy for the whole
+ * attempt *and* the exchange + store write that follows it, so a settled
+ * attempt always has its session (or its error) already in the status the poll
+ * just read. The account list must not take part: reading "it has accounts" as
+ * "the attempt finished" made adding a *second* account end one poll tick in —
+ * the first account was already there, so the card lost the user code and the
+ * "open the page" button within ~2s and the poller stopped, leaving a login
+ * that finished in the browser invisible until the page was reloaded.
+ * @param status - the provider's last reported state.
+ * @returns true when no login attempt is running for the provider.
+ */
+export declare function attemptSettled(status: ProviderStatus): boolean;
 /**
  * The Subscriptions settings page component.
  * @param props - the slot inject face ({@link SubscriptionsSectionInjected}).

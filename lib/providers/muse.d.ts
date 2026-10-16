@@ -342,6 +342,20 @@ export declare class MuseAdapter extends LlmAdapter {
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(provider: string): import("@deepseek-ai/dsh-llm").ResolvedRetryPolicy;
     private staticModels;
+    /** Every model this provider's accounts have listed, newest knowledge first. */
+    private knownModels;
+    /**
+     * The catalog an account answers with when its live discovery failed. The
+     * built-in list plus whatever another account of this provider has listed:
+     * a gated network leaves this account's catalog UNKNOWN, not empty, and
+     * answering with the built-in list alone lets it shrink account pools — one
+     * gated login would keep a live model out of failover, so the one account
+     * that could list it would face a closed window alone and report it as a
+     * terminal quota error while healthy accounts sat idle. The union only grows
+     * with models the provider is really serving, so it never widens the picker
+     * beyond what some account has listed.
+     */
+    private fallbackModels;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     /** The provider's own catalog: union of every account, or one account when named. */
     listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>;

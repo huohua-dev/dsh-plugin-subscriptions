@@ -179,6 +179,20 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
                   edit(account.key, next)
                 }} />
             </label>
+            <label style={{ ...stack, gap: 6 }}>
+              <span className="dsh-subscription-label">{t('accountsProxy')}</span>
+              {/* Plain text, not a password field: the URL is the whole value the
+                  user types, credentials included, and it must stay readable. */}
+              <input value={preferences.proxy ?? ''} placeholder={t('accountsProxyPlaceholder')}
+                spellCheck={false} autoComplete="off" autoCapitalize="off" autoCorrect="off"
+                onChange={event => {
+                  const next = { ...preferences }
+                  if (event.target.value.trim()) next.proxy = event.target.value
+                  else delete next.proxy
+                  edit(account.key, next)
+                }} />
+              <small className="dsh-subscription-hint">{t('accountsProxyHint')}</small>
+            </label>
             <label><input type="checkbox" checked={preferences.poolEnabled !== false}
               onChange={event => edit(account.key, { ...preferences, poolEnabled: event.target.checked })} /> {t('accountsPoolEnabled')}</label>
             <label><input type="checkbox" checked={preferences.independentEntry === true}

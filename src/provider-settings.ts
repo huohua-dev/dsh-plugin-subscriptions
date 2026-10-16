@@ -24,6 +24,36 @@ export interface AccountPreferences {
   independentEntry?: boolean
   /** Absent allows every model; [] allows none. */
   poolModels?: string[]
+  /**
+   * One proxy URL used by every request this account makes: `socks5://`,
+   * `socks5h://`, `http://` or `https://`, credentials optional and kept in
+   * clear text (`socks5://user:pass@proxy.example:1080`). Absent means the
+   * account follows the plugin-wide proxy.
+   */
+  proxy?: string
+}
+
+/** Proxy URL schemes an account may use. */
+const PROXY_SCHEMES: readonly string[] = ['socks5', 'socks5h', 'http', 'https']
+
+/**
+ * Validate one account proxy URL. The shape check is deliberately local and
+ * dependency-free — this module is bundled into the web client, which cannot
+ * import the node-only HTTP layer; the authoritative parse happens when the
+ * dispatcher is built.
+ * @param value - the raw field value.
+ * @returns the trimmed URL, or '' when the field should be dropped.
+ */
+function accountProxyOf(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('account proxy must be a string')
+  const proxy = value.trim()
+  if (proxy === '') return ''
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^/?#\s]+)/i.exec(proxy)
+  if (match === null || !PROXY_SCHEMES.includes(match[1].toLowerCase())) {
+    throw new Error(`account proxy must start with ${PROXY_SCHEMES.map(scheme => `${scheme}://`).join(', ')}`
+      + ' (for example socks5://user:pass@proxy.example:1080)')
+  }
+  return proxy
 }
 export interface ProviderPreferences {
   /** Presentation only; never used as a provider or model routing key. */
@@ -93,6 +123,10 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
       if (account.poolModels !== undefined) {
         if (!Array.isArray(account.poolModels) || account.poolModels.some(id => typeof id !== 'string' || !id.trim())) throw new Error('poolModels must be an array of model ids')
         parsed.poolModels = [...new Set(account.poolModels as string[])]
+      }
+      if (account.proxy !== undefined) {
+        const proxy = accountProxyOf(account.proxy)
+        if (proxy !== '') parsed.proxy = proxy
       }
       result.accounts[key] = parsed
     }
@@ -181,6 +215,18 @@ export class ProviderSettingsStore {
   /** The Settings-page Claude cache TTL; undefined follows the plugin config. Read per request, so no clone. */
   promptCacheTtl(): PromptCacheTtlSetting | undefined {
     return this.current.providers.claude?.promptCacheTtl
+  }
+
+  /**
+   * One account's own proxy URL; undefined when the account follows the
+   * plugin-wide proxy. Read on every request that account makes, so no clone.
+   * @param provider - the subscription the account belongs to.
+   * @param account - the account key.
+   * @returns the configured URL, or undefined.
+   */
+  accountProxy(provider: ProviderId, account: string): string | undefined {
+    const accounts = this.current.providers[provider]?.accounts
+    return accounts !== undefined && Object.hasOwn(accounts, account) ? accounts[account].proxy : undefined
   }
 
   /** Creation-time policy survives restarts and never changes an existing session. */

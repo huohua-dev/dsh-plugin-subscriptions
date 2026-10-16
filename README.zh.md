@@ -71,7 +71,7 @@
 
 随 provider 启用自动注册的工具:
 
-- **`web_search`** 搜索提供商(Codex)—— 通过 DSH 原生的 `web_search` 工具和引用界面使用 Codex 托管的网页搜索,复用默认 Codex 账号和插件的代理配置。它只是注册到宿主 `web` 能力位上的候选之一,不会独占:未挂载其他搜索提供商时 DSH 自动选中它,与其他提供商共存时由宿主自己的 `web.searchProvider` 配置决定优先级。在 Codex 的 **Provider tools** 里关闭 **Web search** 只会撤回本提供商,宿主的 `web_search` 工具仍归其余已注册的提供商使用。
+- **`web_search`** 搜索提供商(Codex)—— 通过 DSH 原生的 `web_search` 工具和引用界面使用 Codex 托管的网页搜索,复用默认 Codex 账号,若该账号配置了独立代理也会一并使用。它只是注册到宿主 `web` 能力位上的候选之一,不会独占:未挂载其他搜索提供商时 DSH 自动选中它,与其他提供商共存时由宿主自己的 `web.searchProvider` 配置决定优先级。在 Codex 的 **Provider tools** 里关闭 **Web search** 只会撤回本提供商,宿主的 `web_search` 工具仍归其余已注册的提供商使用。
 - **`x_search`**(Grok)—— xAI 托管的 X 搜索,返回 `{ answer, citations }`。
 - **`image_generate`**(ChatGPT 或 Grok)—— 经 Codex 后端调用 `gpt-image-2`,或经 `api.x.ai/v1/images/generations` 调用 `grok-imagine-image-2.0`。`provider` 参数指定首选提供方(`gpt` 为默认值,可选 `grok`);首选方未登录时自动回退到另一方。图片保存到 `~/.dsh/plugins/subscriptions/images/` 并返回路径。Grok 路径上 `size`/`quality` 参数会映射为 Grok 的 `aspect_ratio`/`quality`。
 - **`video_generate`**(Grok)—— 经 `api.x.ai/v1/videos` 调用 `grok-imagine-video-1.5`(异步提交 + 轮询);MP4 保存到 `~/.dsh/plugins/subscriptions/videos/` 并返回路径,视频直接在对话里内联播放。支持时长(1–15 秒)、宽高比、分辨率,以及通过 `image_url` 做图生视频。
@@ -295,7 +295,24 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 
 插件代理作为可选覆盖设置保留,用于仍受支持的旧版 DSH 以及仅订阅请求使用独立代理的场景。所有订阅相关请求 —— token 交换、模型 API 流式调用、用量查询、模型目录发现,以及 `x_search` / `image_generate` / `video_generate` 工具 —— 都可以使用。在 **设置 → 订阅 → 代理 → 配置…** 中设置:勾选启用,填写代理地址(`http://127.0.0.1:7890`)、可选用户名/密码,以及可选的逗号分隔绕过列表(如 `127.0.0.1`、`localhost`、`*.example.com`)。关闭或绕过插件代理后使用 DSH 的全局 fetch 路由,**不一定直连**;要求直连时还应配置宿主的 `NO_PROXY`。密码保存在 `~/.dsh/plugins/subscriptions/proxy.json`(权限 0600),不会回传给浏览器;「测试」按钮会用当前配置探测一次端点,显示 HTTP 状态码与耗时。
 
-保存后立即对后续请求生效,无需重启。OAuth 授权页在浏览器中打开,走浏览器/系统自身的代理设置,不受此配置影响;不支持 socks 代理。
+保存后立即对后续请求生效,无需重启。OAuth 授权页在浏览器中打开,走浏览器/系统自身的代理设置,不受此配置影响。
+
+代理地址支持 `http://`、`https://`、`socks5://` 和 `socks5h://`(地址里的账号密码用作代理认证;socks5 由代理端解析目标域名)。
+
+### 每个账号单独配置代理
+
+每种订阅的每个账号都可以使用自己的代理,与上面的全局设置互不影响。在 **设置 → 订阅 → 管理…** 中,每个账号卡片都有一个 **代理** 输入框:
+
+```
+socks5://user:pass@proxy.example:1080
+http://proxy.example:8080
+```
+
+该字段是明文输入框 —— 按输入原样显示、编辑并保存(含账号密码),存放在 `~/.dsh/plugins/subscriptions/provider-settings.json`(权限 0600)。该账号发出的所有请求都会走它:模型请求(账号池与独立入口)、令牌刷新、用量查询、按账号的模型目录发现、Codex 重置额度兑换、Claude 的 keychain 后台同步,以及该账号的工具调用(`x_search`、`video_generate`、`image_generate`,以及默认 Codex 账号的 `web_search`)。
+
+唯一的例外是首次登录:OAuth 令牌交换发生在账号存在之前,因此仍走全局代理设置(或 DSH 自身的网络设置);OAuth 授权页照旧在浏览器中打开。
+
+留空表示跟随全局代理设置(全局也关闭时使用 DSH 自身的网络设置)。填写了代理的账号不再读取全局的绕过列表 —— 为账号单独指定代理本身就是显式选择。代理不可用时该请求会直接失败,不会静默回退为直连。保存后下一个请求即生效,无需重启,也不影响已有会话与账号池。
 
 ## 相关插件
 

@@ -33,15 +33,18 @@ try {
   await personal.getByLabel('Show an independent entry').check()
   await personal.locator('summary').click()
   await personal.getByRole('button', { name: 'Clear selection' }).click()
+  // The per-account proxy is a plain text field: typed as-is, credentials and all.
+  await personal.getByLabel('Proxy (optional)').fill('socks5://user:pass@proxy.example:1080')
   await page.evaluate(() => { window.settings.visibleModels = ['new-model']; window.failSave = true })
   await page.getByRole('button', { name: 'Save changes' }).click()
   await page.getByRole('alert').filter({ hasText: 'Simulated save failure' }).waitFor()
   assert.equal(await personal.getByLabel('Alias (optional)').inputValue(), 'Personal')
+  assert.equal(await personal.getByLabel('Proxy (optional)').inputValue(), 'socks5://user:pass@proxy.example:1080')
   await page.evaluate(() => { window.failSave = false })
   await page.getByRole('button', { name: 'Save changes' }).click()
   await page.getByRole('dialog').waitFor({ state: 'detached' })
   assert.deepEqual(await page.evaluate(() => window.saved[0]), {
-    visibleModels: ['new-model'], accounts: { personal: { alias: 'Personal', poolEnabled: false, independentEntry: true, poolModels: [] } },
+    visibleModels: ['new-model'], accounts: { personal: { alias: 'Personal', proxy: 'socks5://user:pass@proxy.example:1080', poolEnabled: false, independentEntry: true, poolModels: [] } },
   })
   assert.equal(await page.getByRole('button', { name: 'Manage', exact: true }).evaluate(el => el === document.activeElement), true)
   await open()

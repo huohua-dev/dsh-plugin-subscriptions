@@ -4,6 +4,7 @@ import type { AccountTokenManager } from './accounts.js'
 import { httpLlmError } from './common.js'
 import type { RateLimitResetReader } from './rate-limit.js'
 import { AUTH_COOLDOWN_MS, DEFAULT_QUOTA_COOLDOWN_MS, TRANSIENT_COOLDOWN_MS, PoolHealthRegistry, memberKey } from './pool-health.js'
+import { accountScoped } from './account-proxy.js'
 
 type ImageProvider = 'codex' | 'grok'
 interface ImageSession { accessToken: string; refreshToken: string; expiresAt: number }
@@ -58,15 +59,16 @@ export class ImageAccountPool {
       }
       let failure: LlmError
       try {
-        let session = await tokens.session(account)
+        // The image request leaves through the chosen account's own proxy.
+        let session = await accountScoped(provider, account, () => tokens.session(account))
         signal.throwIfAborted()
-        let response = await send(session)
+        let response = await accountScoped(provider, account, () => send(session))
         // Only a definitive unauthorized rejection permits retrying this account.
         if (response.status === 401) {
           await response.body?.cancel()
-          session = await tokens.session(account, true)
+          session = await accountScoped(provider, account, () => tokens.session(account, true))
           signal.throwIfAborted()
-          response = await send(session)
+          response = await accountScoped(provider, account, () => send(session))
         }
         signal.throwIfAborted()
         if (response.ok) {

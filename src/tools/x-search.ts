@@ -12,6 +12,7 @@ import { httpLlmError } from '../providers/common.js'
 import { AccountTokenManager } from '../providers/accounts.js'
 import type { FetchFn } from '../providers/common.js'
 import { proxiedFetch } from '../http.js'
+import { accountScoped } from '../providers/account-proxy.js'
 
 /** Endpoint the search request is posted to. */
 export const X_SEARCH_URL = 'https://api.x.ai/v1/responses'
@@ -196,8 +197,10 @@ export function createXSearchTool(options: XSearchToolOptions): ToolDefinition {
     },
     async execute(args, exec) {
       const request = buildXSearchRequest(args)
-      const session = await options.tokens.session()
-      const response = await (options.fetchFn ?? proxiedFetch)(X_SEARCH_URL, {
+      // Grok tool calls follow the default account, proxy included.
+      const account = await options.tokens.defaultAccount()
+      const session = await accountScoped('grok', account, () => options.tokens.session())
+      const response = await accountScoped('grok', account, () => (options.fetchFn ?? proxiedFetch)(X_SEARCH_URL, {
         method: 'POST',
         headers: {
           'authorization': `Bearer ${session.accessToken}`,
@@ -211,7 +214,7 @@ export function createXSearchTool(options: XSearchToolOptions): ToolDefinition {
           store: false,
         }),
         signal: exec.signal,
-      })
+      }))
       if (!response.ok) throw await httpLlmError(response, 'x_search')
       return parseXSearchResponse(await response.json())
     },

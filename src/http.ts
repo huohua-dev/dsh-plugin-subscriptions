@@ -10,14 +10,36 @@
  * `proxySet` / `proxyTest` RPC endpoints drive it from the web Settings page;
  * a saved config applies immediately to subsequent requests.
  *
+ * Two routes exist, checked in order:
+ *
+ * 1. **Per account** — {@link runWithAccountProxy} marks the async context with
+ *    the account a request belongs to, and a proxy saved on THAT account
+ *    (`accounts[key].proxy` in the provider settings) takes over every fetch
+ *    made in the context: model streams, token refresh, usage polls, catalog
+ *    discovery. Accounts without one keep the plugin-wide behaviour below.
+ * 2. **Plugin-wide** — one config for everything else, with an HTTP(S) or
+ *    SOCKS5 origin and a bypass list.
+ *
  * The OAuth authorize step opens in the user's browser, which uses the
  * browser/system proxy and is outside this module's reach.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
+import * as undici from 'undici'
+import type { Dispatcher } from 'undici'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { getDefaultAutoSelectFamilyAttemptTimeout, setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+
+/**
+ * undici's SOCKS5 dispatcher, resolved off the namespace rather than imported
+ * by name: it only exists in newer 7.x builds, and a missing named export is a
+ * load-time SyntaxError that would take the whole plugin down. An older build
+ * degrades to a clear per-request error only if someone actually configures a
+ * SOCKS5 proxy.
+ */
+const Socks5ProxyAgent = (undici as { Socks5ProxyAgent?: new (url: string) => Dispatcher }).Socks5ProxyAgent
 
 /**
  * undici's own fetch, typed to the DOM fetch signature: its bundled types are
@@ -31,7 +53,7 @@ const dispatchFetch = undiciFetch as unknown as typeof fetch
 export interface ProxyConfig {
   /** Whether outbound subscription requests route through {@link url}. */
   enabled: boolean
-  /** Proxy origin: `http://host:port` or `https://host:port`. */
+  /** Proxy origin: `http://host:port`, `https://host:port` or `socks5://host:port`. */
   url: string
   /** Optional proxy user for basic auth. */
   username?: string
@@ -123,7 +145,7 @@ const DISABLED: ProxyConfig = { enabled: false, url: '', bypass: [] }
 /** Current config; updated by every load/apply/save. */
 let current: ProxyConfig = DISABLED
 /** The live dispatcher, or undefined when proxies are off/errored. */
-let agent: ProxyAgent | undefined
+let agent: Dispatcher | undefined
 /** Last load/apply failure, surfaced by the config view. */
 let configError: string | undefined
 /** One lazy load of the on-disk config (module-import cheap; file read once). */
@@ -175,9 +197,18 @@ function withError(error: unknown): void {
   configError = errorMessage(error)
 }
 
+/** Schemes undici reaches through a SOCKS5 tunnel instead of an HTTP CONNECT. */
+const SOCKS_PROTOCOLS: ReadonlySet<string> = new Set(['socks:', 'socks5:', 'socks5h:'])
+
+/** Whether one parsed proxy URL speaks SOCKS5 rather than HTTP CONNECT. */
+export function isSocksProxy(url: URL): boolean {
+  return SOCKS_PROTOCOLS.has(url.protocol)
+}
+
 /**
- * Parse and validate a proxy URL. Only HTTP(S) proxies are supported because
- * the undici dispatcher speaks CONNECT over HTTP; socks5 is not supported.
+ * Parse and validate a proxy URL. An HTTP(S) proxy speaks CONNECT; a SOCKS5
+ * one gets a tunneled dispatcher. Anything else (e.g. `socks4://`) is rejected
+ * with a message naming the schemes that do work.
  * @param raw - the URL the user configured.
  * @returns the parsed URL (credentials attached by the caller).
  */
@@ -188,8 +219,8 @@ export function parseProxyUrl(raw: string): URL {
   } catch {
     throw new Error(`proxy URL "${raw}" is not a valid URL`)
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error(`proxy URL must use the http:// or https:// scheme (got "${raw}")`)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:' && !isSocksProxy(url)) {
+    throw new Error(`proxy URL must use the http://, https://, socks5:// or socks5h:// scheme (got "${raw}")`)
   }
   if (url.hostname === '') throw new Error('proxy URL must include a host')
   return url
@@ -243,18 +274,36 @@ function normalizeConfig(input: ProxyInput): ProxyConfig {
   }
 }
 
-/** Build the undici agent for a config (throws on an unusable URL). */
-function buildAgent(cfg: ProxyConfig): ProxyAgent | undefined {
+/**
+ * Build the dispatcher for one parsed proxy URL. HTTP(S) origins use undici's
+ * CONNECT agent; SOCKS5 origins use its tunneled agent, with credentials read
+ * from the URL (undici percent-decodes them) and `socks5h` normalized to
+ * `socks5` — the tunnel already resolves destination names at the proxy.
+ * @param url - a URL accepted by {@link parseProxyUrl}.
+ * @returns the dispatcher to attach to undici fetch.
+ */
+function buildDispatcher(url: URL): Dispatcher {
+  if (!isSocksProxy(url)) return new ProxyAgent(url.toString())
+  if (Socks5ProxyAgent === undefined) {
+    throw new Error('socks5 proxies need undici 7.14 or newer; upgrade undici or configure an http:// proxy instead')
+  }
+  const normalized = new URL(url.toString())
+  normalized.protocol = 'socks5:'
+  return new Socks5ProxyAgent(normalized.toString())
+}
+
+/** Build the dispatcher for one stored plugin-wide config (throws on an unusable URL). */
+function buildAgent(cfg: ProxyConfig): Dispatcher | undefined {
   if (!cfg.enabled || cfg.url === '') return undefined
   const url = parseProxyUrl(cfg.url)
   if (cfg.username !== undefined) url.username = cfg.username
   if (cfg.password !== undefined) url.password = cfg.password
-  return new ProxyAgent(url.toString())
+  return buildDispatcher(url)
 }
 
 /** Swap in a config and its agent; a failed agent falls back to host routing. */
 async function applyConfig(cfg: ProxyConfig | undefined): Promise<void> {
-  let next: ProxyAgent | undefined
+  let next: Dispatcher | undefined
   if (cfg !== undefined) {
     configError = undefined
     try {
@@ -339,11 +388,15 @@ async function persistConfig(cfg: ProxyConfig, path: string): Promise<void> {
  */
 export async function resetProxyForTests(): Promise<void> {
   const previous = agent
+  const previousAccounts = [...accountDispatchers.values()]
   agent = undefined
+  accountDispatchers.clear()
+  accountProxyResolver = () => undefined
   current = { ...DISABLED, bypass: [] }
   ready = undefined
   configError = undefined
   if (previous !== undefined) await previous.close().catch(() => undefined)
+  for (const entry of previousAccounts) await entry.dispatcher.close().catch(() => undefined)
 }
 
 /**
@@ -388,19 +441,124 @@ export async function proxySetConfig(input: ProxyInput): Promise<ProxyConfigView
   return proxyGetConfig()
 }
 
+/** The account a request belongs to; set by the routing layer, read here. */
+export interface AccountRoute {
+  provider: string
+  account: string
+}
+
 /**
- * The fetch caller all subscription code uses: routes through the configured
- * proxy unless the host bypasses it. Identity-passthrough otherwise: the host
- * may itself route global fetch through an environment-configured proxy.
+ * The async context marker. Provider code calls `proxiedFetch` from deep inside
+ * token refreshes, model streams and catalog discovery without knowing which
+ * account is serving it, so the account is carried on the async context
+ * instead of threaded through every call signature.
+ */
+const accountRoute = new AsyncLocalStorage<AccountRoute>()
+
+/** Per-account proxy URLs, read live from the provider settings store. */
+type AccountProxyResolver = (provider: string, account: string) => string | undefined
+let accountProxyResolver: AccountProxyResolver = () => undefined
+
+/** Live per-account dispatchers, rebuilt when their configured URL changes. */
+const accountDispatchers = new Map<string, { url: string; dispatcher: Dispatcher }>()
+
+/**
+ * Point the per-account route at the saved provider settings. Passing
+ * `undefined` detaches the lookup (the resolver then reports "no proxy").
+ * @param resolver - reads one account's configured proxy URL.
+ */
+export function setAccountProxyResolver(resolver: AccountProxyResolver | undefined): void {
+  accountProxyResolver = resolver ?? (() => undefined)
+  void invalidateAccountProxies()
+}
+
+/**
+ * Close and forget every per-account dispatcher. Called when settings change
+ * so a saved URL takes effect on the next request instead of waiting for the
+ * cached agent to age out.
+ */
+export async function invalidateAccountProxies(): Promise<void> {
+  const open = [...accountDispatchers.values()]
+  accountDispatchers.clear()
+  for (const entry of open) await entry.dispatcher.close().catch(() => undefined)
+}
+
+/**
+ * Run `body` with `route` marked as the current account. Fetches made in that
+ * async context — including ones started by awaited callbacks — use that
+ * account's proxy.
+ * @param route - the serving account.
+ * @param body - the work to run.
+ * @returns whatever `body` returns.
+ */
+export function runWithAccountProxy<T>(route: AccountRoute, body: () => T): T {
+  return accountRoute.run(route, body)
+}
+
+/**
+ * Walk an account's async iterable inside its proxy context. The context is
+ * re-entered for every step, because a generator's body first runs on the
+ * consumer's `next()` call — long after `runWithAccountProxy` returned.
+ * @param route - the serving account.
+ * @param source - the account's own stream.
+ * @returns the same chunks, in order, routed through the account's proxy.
+ */
+export async function* withAccountProxy<T>(route: AccountRoute, source: AsyncIterable<T>): AsyncIterable<T> {
+  const iterator = source[Symbol.asyncIterator]()
+  const step = () => accountRoute.run(route, () => iterator.next())
+  try {
+    for (let next = await step(); next.done !== true; next = await step()) yield next.value
+  } finally {
+    // Closing a half-consumed stream runs the account's own cleanup, which may
+    // itself issue a request (aborting an upload), so it stays in context too.
+    await accountRoute.run(route, async () => { await iterator.return?.() })
+  }
+}
+
+/**
+ * The dispatcher for one account's own proxy, or undefined when it has none.
+ * Dispatchers are cached per account and rebuilt only when the configured URL
+ * changes, so a long stream keeps its keep-alive tunnel across requests.
+ */
+async function accountDispatcher(route: AccountRoute): Promise<Dispatcher | undefined> {
+  const configured = accountProxyResolver(route.provider, route.account)?.trim() ?? ''
+  const key = `${route.provider}/${route.account}`
+  const cached = accountDispatchers.get(key)
+  if (configured === '') {
+    accountDispatchers.delete(key)
+    if (cached !== undefined) await cached.dispatcher.close().catch(() => undefined)
+    return undefined
+  }
+  if (cached?.url === configured) return cached.dispatcher
+  const url = parseProxyUrl(configured)
+  const dispatcher = buildDispatcher(url)
+  if (cached !== undefined) void cached.dispatcher.close().catch(() => undefined)
+  accountDispatchers.set(key, { url: configured, dispatcher })
+  return dispatcher
+}
+
+/**
+ * The fetch caller all subscription code uses. An account-scoped request goes
+ * through that account's own proxy when one is configured (the plugin-wide
+ * bypass list does not apply to it — the account's proxy is an explicit choice);
+ * everything else follows the plugin-wide config, and identity-passthrough
+ * means host routing, which may still be an environment-configured proxy.
  *
- * Proxied requests run on undici's own fetch (not the global one) so the
- * ProxyAgent dispatcher always comes from the same undici build the request
- * is issued with — a mismatched dispatcher can be silently ignored by the
- * host's global fetch.
+ * Dispatched requests run on undici's own fetch (not the global one) so the
+ * dispatcher always comes from the same undici build the request is issued
+ * with — a mismatched dispatcher can be silently ignored by the host's global
+ * fetch.
  */
 export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   await ensureReady()
-  let dispatcher: ProxyAgent | undefined
+  const route = accountRoute.getStore()
+  if (route !== undefined) {
+    const scoped = await accountDispatcher(route)
+    if (scoped !== undefined) {
+      return dispatchFetch(input, { ...init, dispatcher: scoped } as RequestInit)
+    }
+  }
+  let dispatcher: Dispatcher | undefined
   if (current.enabled && agent !== undefined) {
     let hostname = ''
     try {
@@ -436,7 +594,7 @@ export async function proxyTestConnection(target = DEFAULT_PROXY_TEST_URL, draft
     return { ok: false, viaProxy: false, error: errorMessage(error) }
   }
   await ensureReady()
-  let probeAgent: ProxyAgent | undefined
+  let probeAgent: Dispatcher | undefined
   let viaProxy: boolean
   let closeProbe = false
   if (draft !== undefined) {

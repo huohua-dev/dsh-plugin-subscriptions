@@ -71,7 +71,7 @@ Logged-in cards also show **subscription usage** — per rate-limit window (5-ho
 
 Also included, registered when the matching provider is enabled:
 
-- **`web_search`** provider (Codex) — uses Codex's hosted web search through DSH's native tool and citation UI. It follows the default Codex account and the plugin's proxy configuration. It registers as one candidate behind the host's `web` seam and does not claim it: with no other search provider mounted DSH auto-selects it, and alongside another one you pick the winner with the host's own `web.searchProvider` setting. Turning **Web search** off under Codex's **Provider tools** withdraws this provider, leaving the host's `web_search` tool to whatever else is registered.
+- **`web_search`** provider (Codex) — uses Codex's hosted web search through DSH's native tool and citation UI. It follows the default Codex account, including that account's own proxy when one is configured. It registers as one candidate behind the host's `web` seam and does not claim it: with no other search provider mounted DSH auto-selects it, and alongside another one you pick the winner with the host's own `web.searchProvider` setting. Turning **Web search** off under Codex's **Provider tools** withdraws this provider, leaving the host's `web_search` tool to whatever else is registered.
 - **`x_search`** tool (Grok) — xAI's hosted X search, returning `{ answer, citations }`.
 - **`image_generate`** tool (ChatGPT or Grok) — `gpt-image-2` via the Codex backend, or `grok-imagine-image-2.0` via `api.x.ai/v1/images/generations`. The `provider` argument picks the preferred provider (`gpt`, the default, or `grok`); when the preferred one is logged out the other serves as fallback. Images are saved under `~/.dsh/plugins/subscriptions/images/` and the paths returned. The `size`/`quality` arguments map onto Grok's `aspect_ratio`/`quality` on the Grok path.
 - **`video_generate`** tool (Grok) — `grok-imagine-video-1.5` via `api.x.ai/v1/videos` (async submit + poll); MP4s are saved under `~/.dsh/plugins/subscriptions/videos/`, the path returned, and the clip plays inline in the conversation. Supports duration (1–15 s), aspect ratio, resolution, and image-to-video via `image_url`.
@@ -294,7 +294,24 @@ DSH `v0.1.3-alpha.1` introduces host-managed proxy routing. Prefer configuring `
 
 The optional plugin override remains available for supported older DSH hosts and subscription-only routing. Every subscription request — token exchanges, model-API streams, usage lookups, model discovery, and the `web_search` / `x_search` / `image_generate` / `video_generate` tools — can use it. Configure it in **Settings → Subscriptions → Proxy → Configure…**: enable the flag, enter the proxy URL (`http://127.0.0.1:7890`), optional username/password, and an optional comma-separated bypass list (`127.0.0.1`, `localhost`, `*.example.com`). Disabled or bypassed requests use DSH's global fetch routing, **not necessarily a direct connection**; use the host's `NO_PROXY` when direct routing is required. The password is stored in `~/.dsh/plugins/subscriptions/proxy.json` (mode 0600) and is never returned to the browser. A "Test" button probes one endpoint through the current configuration and shows the HTTP status/latency.
 
-Changes apply immediately to subsequent requests — no restart needed. The OAuth authorization page opens in your browser and follows the browser/system proxy, not this setting. SOCKS proxies are not supported.
+Changes apply immediately to subsequent requests — no restart needed. The OAuth authorization page opens in your browser and follows the browser/system proxy, not this setting.
+
+`http://`, `https://`, `socks5://` and `socks5h://` origins are all accepted (credentials in the URL are used for proxy authentication; SOCKS5 resolves destination names at the proxy).
+
+### Per-account proxies
+
+Each account of every subscription can route through its own proxy, independently of the plugin-wide setting above. In **Settings → Subscriptions → Manage…**, every account card has one **Proxy** field:
+
+```
+socks5://user:pass@proxy.example:1080
+http://proxy.example:8080
+```
+
+The value is plain text — it is shown, edited and stored as typed, credentials included, in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600). Everything that account sends goes through it: model requests (pooled and independent entries), token refresh, quota/usage lookups, per-account model discovery, the Codex reset-credit redemption, Claude's background keychain sync, and that account's tool calls (`x_search`, `video_generate`, `image_generate`, and `web_search` for the default Codex account).
+
+Logging in a brand-new account is the one exception: the OAuth token exchange happens before the account exists, so it follows the plugin-wide proxy (or the host's own network settings) — the OAuth consent page itself always opens in the browser.
+
+An account with the field blank follows the plugin-wide proxy (and DSH's own network settings when that is disabled). An account with a proxy does **not** consult the plugin-wide bypass list: naming a proxy per account is an explicit choice for that account's traffic. A proxy that cannot be reached fails the request — it never silently falls back to a direct connection. Saving takes effect on the next request; no restart, and no pools or sessions are disturbed.
 
 ## Related plugins
 

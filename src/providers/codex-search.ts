@@ -5,6 +5,7 @@ import { WebError } from '@deepseek-ai/dsh-web'
 import type { WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
 import type { CodexSession } from '../auth/store.js'
 import type { AccountTokenManager } from '../providers/accounts.js'
+import { accountScoped } from './account-proxy.js'
 
 export const CODEX_SEARCH_PROVIDER_ID = 'codex'
 export const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'
@@ -15,6 +16,11 @@ const RETRY_BASE_MS = 100
 
 export interface CodexWebSearchOptions {
   tokens: Pick<AccountTokenManager<CodexSession>, 'session'>
+  /**
+   * The default account key, so the search leaves through that account's own
+   * proxy. Absent (a narrow embedder passing only `session`) runs unscoped.
+   */
+  defaultAccount?: () => Promise<string | undefined>
   /**
    * Current state of the Codex `web_search` tool switch. Absent counts as
    * enabled. Read on every {@link CodexWebSearchProvider.available} call so
@@ -37,9 +43,11 @@ export class CodexWebSearchProvider implements WebSearchProvider {
 
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
     throwIfAborted(signal)
+    // The serving account's own proxy applies to the search request too.
+    const account = await this.options.defaultAccount?.()
     let session: CodexSession
     try {
-      session = await this.options.tokens.session()
+      session = await accountScoped('codex', account, () => this.options.tokens.session())
     } catch (cause) {
       throw new WebError(
         'Codex Web Search requires a logged-in Codex account; log in via Settings → Subscriptions',
@@ -59,7 +67,7 @@ export class CodexWebSearchProvider implements WebSearchProvider {
       },
       max_output_tokens: 2048,
     }
-    const value = await this.dispatch(body, session, signal)
+    const value = await accountScoped('codex', account, () => this.dispatch(body, session, signal))
     return normalizeCodexSearchResponse(value)
   }
 

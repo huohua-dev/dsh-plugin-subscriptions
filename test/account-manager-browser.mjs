@@ -35,6 +35,23 @@ try {
   await personal.getByRole('button', { name: 'Clear selection' }).click()
   // The per-account proxy is a plain text field: typed as-is, credentials and all.
   await personal.getByLabel('Proxy (optional)').fill('socks5://user:pass@proxy.example:1080')
+  // The per-account probe uses that field as typed, without saving it first.
+  await personal.getByRole('button', { name: 'Test model fetch' }).click()
+  await personal.getByRole('status').filter({ hasText: 'through the account proxy' }).waitFor()
+  assert.deepEqual(await page.evaluate(() => window.probes[0]), {
+    account: 'personal', proxy: 'socks5://user:pass@proxy.example:1080',
+  })
+  assert.deepEqual(await page.evaluate(() => window.saved.length), 0, 'probing never saves')
+  // A blank field probes DSH network settings, on that account only.
+  const work = page.getByRole('group', { name: 'work@example.com', exact: true })
+  await work.getByRole('button', { name: 'Test model fetch' }).click()
+  await work.getByRole('status').filter({ hasText: 'through DSH network settings' }).waitFor()
+  assert.deepEqual(await page.evaluate(() => window.probes[1]), { account: 'work', proxy: '' })
+  // An unreachable proxy is reported on the card, with its cause.
+  await personal.getByLabel('Proxy (optional)').fill('socks5://broken')
+  await personal.getByRole('button', { name: 'Test model fetch' }).click()
+  await personal.getByRole('alert').filter({ hasText: 'ECONNREFUSED' }).waitFor()
+  await personal.getByLabel('Proxy (optional)').fill('socks5://user:pass@proxy.example:1080')
   await page.evaluate(() => { window.settings.visibleModels = ['new-model']; window.failSave = true })
   await page.getByRole('button', { name: 'Save changes' }).click()
   await page.getByRole('alert').filter({ hasText: 'Simulated save failure' }).waitFor()
@@ -148,5 +165,5 @@ try {
   await personal.locator('summary').click()
   await page.screenshot({ path: 'output/account-manager-preview.png' })
   assert.deepEqual(errors, [])
-  console.log('Account-manager browser checks passed: defaults, strict selection, failed-save retry, fresh-settings merge, Escape/focus containment and restoration, responsive width.')
+  console.log('Account-manager browser checks passed: defaults, strict selection, per-account proxy probe, failed-save retry, fresh-settings merge, Escape/focus containment and restoration, responsive width.')
 } finally { await browser.close() }

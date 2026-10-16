@@ -16,6 +16,7 @@ import {
   parseProxyUrl,
   proxiedFetch,
   resetProxyForTests,
+  runAccountProxyProbe,
   runWithAccountProxy,
   setAccountProxyResolver,
   withAccountProxy,
@@ -196,6 +197,71 @@ test('a broken or unbuildable account proxy fails loudly instead of leaking dire
   } finally {
     await resetProxyForTests()
     await origin.close()
+  }
+})
+
+test('the Settings probe uses the proxy it is handed, saved or still a draft', async () => {
+  const socks = await startSocks5Server()
+  const origin = await startOrigin()
+  const previousHome = process.env.DSH_HOME
+  const dir = await mkdtemp(join(tmpdir(), 'account-proxy-probe-'))
+  process.env.DSH_HOME = dir
+  await resetProxyForTests()
+  const route = { provider: 'codex', account: 'work' }
+  const fetchOrigin = () => proxiedFetch(origin.url).then(response => response.text())
+  try {
+    setAccountProxyResolver((_provider, account) => (account === 'work' ? socks.url : undefined))
+    // No draft: the account's saved proxy answers, exactly like a real request.
+    assert.deepEqual(await runAccountProxyProbe(route, undefined, fetchOrigin), {
+      ok: true, viaProxy: true, value: 'origin',
+    })
+    assert.equal(socks.tunnels().length, 1)
+
+    // A blank field means NO account proxy even though one is saved: the probe
+    // reports the card as typed, not the stored setting.
+    assert.deepEqual(await runAccountProxyProbe(route, '   ', fetchOrigin), {
+      ok: true, viaProxy: false, value: 'origin',
+    })
+    assert.equal(socks.tunnels().length, 1, 'a blank probe never touches the saved proxy')
+
+    // An unsaved URL is the whole point: it tunnels now, and the account's own
+    // dispatcher cache is untouched, so live routing still uses the saved one.
+    assert.deepEqual(await runAccountProxyProbe(route, ` ${socks.url} `, fetchOrigin), {
+      ok: true, viaProxy: true, value: 'origin',
+    })
+    assert.equal(socks.tunnels().length, 2, 'the draft URL carried the probe')
+    assert.deepEqual(await runAccountProxyProbe(route, undefined, fetchOrigin), {
+      ok: true, viaProxy: true, value: 'origin',
+    })
+    assert.equal(await runWithAccountProxy(route, fetchOrigin), 'origin', 'live traffic kept the saved proxy')
+
+    // An unusable URL is a config problem: it fails before a request is sent.
+    const before = socks.tunnels().length
+    const unusable = await runAccountProxyProbe(route, 'ftp://proxy.example', fetchOrigin)
+    assert.equal(unusable.ok, false)
+    assert.equal(unusable.viaProxy, false)
+    assert.match(unusable.error ?? '', /scheme/)
+    assert.equal(socks.tunnels().length, before)
+
+    // An unreachable proxy fails the probe instead of silently going direct.
+    const dead = await runAccountProxyProbe(route, 'http://127.0.0.1:1', fetchOrigin)
+    assert.equal(dead.ok, false)
+    assert.equal(dead.viaProxy, true, 'the probe asked for a proxy, and did get one')
+    assert.equal(socks.tunnels().length, before, 'the failed probe reached no tunnel')
+    assert.equal(await fetchOrigin(), 'origin', 'and host routing still works')
+
+    // An account with no saved proxy reports host routing for both drafts.
+    setAccountProxyResolver(() => undefined)
+    assert.deepEqual(await runAccountProxyProbe(route, undefined, fetchOrigin), {
+      ok: true, viaProxy: false, value: 'origin',
+    })
+  } finally {
+    await resetProxyForTests()
+    await socks.close()
+    await origin.close()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(dir, { recursive: true, force: true })
   }
 })
 

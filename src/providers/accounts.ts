@@ -43,6 +43,15 @@ export interface AccountAwareAdapter extends LlmAdapter {
    */
   listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>
   /**
+   * One live model-list request for one account, reported as it came back: no
+   * cache read and no last-known/static fallback, and failures propagate. The
+   * Settings per-account probe uses it to show whether that account's own proxy
+   * really reaches the provider — {@link listOwnModels} cannot answer that,
+   * because a cached or built-in catalog looks exactly like a live one.
+   * Optional: a provider with a static catalog has nothing to fetch.
+   */
+  probeOwnModels?(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>
+  /**
    * The last catalog one account successfully listed, with no network.
    * Routing falls back to it when a live `listOwnModels` times out.
    */

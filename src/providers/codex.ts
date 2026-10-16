@@ -978,6 +978,16 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /**
+   * One live model-list request for this account, bypassing every cache and
+   * every fallback: the Settings probe must report what this account's own
+   * proxy reached, and a cached or built-in catalog would say nothing.
+   */
+  async probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    if (!this.options.discovery) return this.staticModels(provider)
+    return this.listed(provider, await this.fetchCatalog(account, signal))
+  }
+
+  /**
    * The discovered entry for one model. Resolved through the cache's
    * stale-while-revalidate path so capability metadata stays stable across a
    * long conversation: a discovered-only effort (one missing from the static

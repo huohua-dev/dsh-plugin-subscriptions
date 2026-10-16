@@ -7,6 +7,11 @@ export declare const CODEX_SEARCH_MODEL = "gpt-5.6-terra";
 export interface CodexWebSearchOptions {
     tokens: Pick<AccountTokenManager<CodexSession>, 'session'>;
     /**
+     * The default account key, so the search leaves through that account's own
+     * proxy. Absent (a narrow embedder passing only `session`) runs unscoped.
+     */
+    defaultAccount?: () => Promise<string | undefined>;
+    /**
      * Current state of the Codex `web_search` tool switch. Absent counts as
      * enabled. Read on every {@link CodexWebSearchProvider.available} call so
      * turning the switch off releases the seam to another search provider

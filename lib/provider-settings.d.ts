@@ -19,6 +19,13 @@ export interface AccountPreferences {
     independentEntry?: boolean;
     /** Absent allows every model; [] allows none. */
     poolModels?: string[];
+    /**
+     * One proxy URL used by every request this account makes: `socks5://`,
+     * `socks5h://`, `http://` or `https://`, credentials optional and kept in
+     * clear text (`socks5://user:pass@proxy.example:1080`). Absent means the
+     * account follows the plugin-wide proxy.
+     */
+    proxy?: string;
 }
 export interface ProviderPreferences {
     /** Presentation only; never used as a provider or model routing key. */
@@ -45,6 +52,14 @@ export declare class ProviderSettingsStore {
     contextWindow(model: string): number | undefined;
     /** The Settings-page Claude cache TTL; undefined follows the plugin config. Read per request, so no clone. */
     promptCacheTtl(): PromptCacheTtlSetting | undefined;
+    /**
+     * One account's own proxy URL; undefined when the account follows the
+     * plugin-wide proxy. Read on every request that account makes, so no clone.
+     * @param provider - the subscription the account belongs to.
+     * @param account - the account key.
+     * @returns the configured URL, or undefined.
+     */
+    accountProxy(provider: ProviderId, account: string): string | undefined;
     /** Creation-time policy survives restarts and never changes an existing session. */
     toolEnabled(provider: ProviderId, tool: SubscriptionTool, createdAt?: number): boolean;
     set(provider: ProviderId, input: unknown): Promise<void>;

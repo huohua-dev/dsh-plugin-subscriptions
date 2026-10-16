@@ -22,6 +22,9 @@ export declare const en: {
     accountsPoolEnabled: string;
     accountsIndependent: string;
     accountsIndependentHint: string;
+    accountsProxy: string;
+    accountsProxyPlaceholder: string;
+    accountsProxyHint: string;
     accountsModels: string;
     accountsModelsAll: string;
     accountsModelsCount: string;
@@ -207,6 +210,9 @@ export declare const zh: {
     accountsPoolEnabled: string;
     accountsIndependent: string;
     accountsIndependentHint: string;
+    accountsProxy: string;
+    accountsProxyPlaceholder: string;
+    accountsProxyHint: string;
     accountsModels: string;
     accountsModelsAll: string;
     accountsModelsCount: string;

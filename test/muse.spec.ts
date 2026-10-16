@@ -384,6 +384,55 @@ test('a gated network falls back to the static catalog with one warning; a persi
   assert.equal(notFound.calls.filter(call => call.url === MUSE_MODELS_URL).length, 1, 'the network is checked once')
 })
 
+test('a gated account still pools the models another account listed (issue: quota exhausted with quota left)', async () => {
+  // One login sees the catalog, the rest are answered an empty one. A gated
+  // account's catalog is UNKNOWN, so it must not fall back to a list that
+  // omits the live model: that silently leaves the model's pool with one
+  // member, and the member's closed window ends the turn as a terminal quota
+  // error while the other accounts sit idle with quota to spare.
+  const sessions = new Map(['live', 'gated-one', 'gated-two'].map((key, index) => [key, {
+    accessToken: `LLM|${String(index)}`, refreshToken: `dca:${key}`, expiresAt: Date.now() + 3_600_000,
+  } satisfies MuseSession]))
+  const tokens = new AccountTokenManager<MuseSession>({
+    provider: 'muse',
+    displayName: 'Test',
+    makeOptions: () => ({ preemptMs: 0, refresh: s => Promise.resolve(s), isPermanent: () => false }),
+    io: {
+      list: () => Promise.resolve([...sessions].map(([key, session]) => ({ key, session }))),
+      get: account => Promise.resolve(account === undefined ? undefined : sessions.get(account)),
+      save: (account, session) => { sessions.set(account, session); return Promise.resolve() },
+      remove: account => { sessions.delete(account); return Promise.resolve() },
+    },
+  })
+  // Meta answers each account's own bearer token; the gated ones get `data: []`.
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const live = (init?.headers as Record<string, string> | undefined)?.authorization === 'Bearer LLM|0'
+    return Promise.resolve(String(input) === MUSE_MODELS_URL
+      ? json(live
+        ? { object: 'list', data: [catalogEntry('muse-spark-1.3'), catalogEntry('muse-wonder-full-1.0')] }
+        : { object: 'list', data: [] })
+      : json({ error: { code: 'rate_limit_exceeded' } }, 429))
+  }) as typeof fetch
+  const adapter = new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3', name: 'Muse Spark 1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens,
+    discovery: true,
+    fetchFn,
+    onWarn: () => undefined,
+  })
+
+  const live = await adapter.listOwnModels('muse', 'live')
+  assert.deepEqual(live.map(model => model.id), ['muse-spark-1.3', 'muse-wonder-full-1.0'])
+  for (const account of ['gated-one', 'gated-two']) {
+    const models = await adapter.listOwnModels('muse', account)
+    assert.ok(models.some(model => model.id === 'muse-wonder-full-1.0'),
+      `${account} must keep muse-wonder-full-1.0 in the pool: a gated catalog is unknown, not empty`)
+    assert.deepEqual(models.map(model => model.id), ['muse-spark-1.3', 'muse-wonder-full-1.0'],
+      `${account} adds nothing the provider is not already serving`)
+  }
+})
+
 test('a connection closed mid-request is a TRANSPORT failure that names the closed socket', async () => {
   // undici's shape when the far side drops an upload: a bare "fetch failed"
   // whose cause is the socket error. The pool and harness show only the

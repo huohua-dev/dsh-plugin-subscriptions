@@ -499,6 +499,11 @@ export class SubscriptionsAuthController implements AuthController {
     // The plan name is shown by the usage section, so `detail` only carries errors.
     const detail = this.lastError.get(provider)
     const clientVersion = await this.clientVersions[provider]?.()
+    // A device-flow attempt outlives the `login` call that started it, and the
+    // Settings page is reloadable: reporting the code here is what puts the
+    // "open the page" button back on a card the user left open or reloaded,
+    // instead of stranding an authorization they cannot finish.
+    const pending = this.deviceFlows.pending(provider)
     return {
       busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider) || this.finalizing.has(provider),
       accounts: entries.map(({ key, session }, index) => {
@@ -512,6 +517,9 @@ export class SubscriptionsAuthController implements AuthController {
           ...plan === undefined ? {} : { plan },
         }
       }),
+      ...pending === undefined
+        ? {}
+        : { pendingLogin: { userCode: pending.userCode, verificationUrl: pending.verificationUrl } },
       ...detail === undefined ? {} : { detail },
       ...clientVersion === undefined ? {} : { clientVersion },
     }

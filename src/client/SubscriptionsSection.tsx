@@ -50,6 +50,8 @@ export interface ProviderStatus {
   displayName?: string
   busy: boolean
   accounts: AccountStatus[]
+  /** Device-flow code the live attempt waits on, for the code card. */
+  pendingLogin?: { userCode: string; verificationUrl: string }
   detail?: string
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
   clientVersion?: { version: string; source: ClientVersionSource }
@@ -290,6 +292,30 @@ function hasAccount(status: ProviderStatus | undefined): boolean {
   return (status?.accounts.length ?? 0) > 0
 }
 
+/** A device-flow code the page shows while the attempt waits for it. */
+export interface PendingDeviceCode {
+  /** Short code the user types at (or confirms on) the verification page. */
+  userCode: string
+  /** Page the user opens to authorize. */
+  verificationUrl: string
+}
+
+/**
+ * The device code to render for one provider: what this page learned from its
+ * own `login` answer first, then what the server still reports. The local copy
+ * answers instantly; the reported one is what survives a reload of the
+ * Settings page, after which the local one is gone but the attempt is not.
+ * @param status - the provider's last reported state, possibly absent.
+ * @param local - the code this page received from its own login attempt.
+ * @returns the code to show, or `undefined` when no attempt is waiting.
+ */
+export function pendingDeviceCode(
+  status: ProviderStatus | undefined,
+  local: PendingDeviceCode | undefined,
+): PendingDeviceCode | undefined {
+  return local ?? status?.pendingLogin
+}
+
 /** The CLI version a route presents, beside the provider name; nothing for routes without one. */
 export function ClientVersionTag({ clientVersion, t }: {
   clientVersion: ProviderStatus['clientVersion']
@@ -449,6 +475,26 @@ export function modelDefaultsSignature(
 }
 
 /**
+ * Whether a provider's login attempt has settled, i.e. nothing is waiting on
+ * the authorization server any more — the poll loop has served its purpose
+ * and the device-code card can go.
+ *
+ * Only `busy` decides this. The server keeps a provider busy for the whole
+ * attempt *and* the exchange + store write that follows it, so a settled
+ * attempt always has its session (or its error) already in the status the poll
+ * just read. The account list must not take part: reading "it has accounts" as
+ * "the attempt finished" made adding a *second* account end one poll tick in —
+ * the first account was already there, so the card lost the user code and the
+ * "open the page" button within ~2s and the poller stopped, leaving a login
+ * that finished in the browser invisible until the page was reloaded.
+ * @param status - the provider's last reported state.
+ * @returns true when no login attempt is running for the provider.
+ */
+export function attemptSettled(status: ProviderStatus): boolean {
+  return !status.busy
+}
+
+/**
  * The Subscriptions settings page component.
  * @param props - the slot inject face ({@link SubscriptionsSectionInjected}).
  * @returns the section body, or a notice while the RPC face is absent.
@@ -461,8 +507,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', copilot: '', antigravity: '', muse: '',
   })
-  /** Pending device-flow codes (copilot), shown while the attempt polls. */
-  const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
+  /**
+   * Device-flow codes this page learned from its own `login` answers, shown
+   * while the attempt polls. The server reports the live attempt in `status`
+   * too, so a reloaded page keeps the card; this only spares the first paint
+   * after the click and is dropped once the attempt settles.
+   */
+  const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, PendingDeviceCode>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
   /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
   const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
@@ -537,7 +588,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     for (const { id } of PROVIDERS) setProviderError(id, undefined)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
-      if (status.accounts.length > 0 || !status.busy) {
+      // Only a settled attempt stops the loop: an account the provider already
+      // served says nothing about the second one the user is authorizing now.
+      if (attemptSettled(status)) {
         stopPolling(id)
         // The attempt settled (success, timeout, or cancel): drop the code card.
         setDeviceCodes((prev) => {
@@ -851,7 +904,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       {PROVIDERS.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
-        const deviceCode = deviceCodes[id]
+        const deviceCode = pendingDeviceCode(status, deviceCodes[id])
         const accounts = status?.accounts ?? []
         return (
           <div key={id} style={styles.card}>

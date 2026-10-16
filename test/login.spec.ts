@@ -30,6 +30,7 @@ import { readClaudeCodeCredentials } from '../src/auth/claude-code-creds.js'
 import {
   CLAUDE_AUTHORIZE_URL, CLAUDE_CALLBACK_PATH, CLAUDE_CLIENT_ID, CLAUDE_SCOPE, CLAUDE_TOKEN_URL,
 } from '../src/providers/claude.js'
+import { MUSE_DEVICE_CODE_URL, museDeviceFlow } from '../src/providers/muse.js'
 import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
 import type { ClaudeSession, StoredSession } from '../src/auth/store.js'
 
@@ -335,6 +336,51 @@ test('login(codex): status stays busy through the token exchange so the Settings
       assert.equal(after.accounts[0]?.account, 'me@example.com')
     } finally {
       await controller.cancel('codex')
+    }
+  })
+})
+
+test('status(muse): a live device-flow attempt reports its code, so a reloaded page keeps the card', async () => {
+  await inIsolatedHome(async () => {
+    // The Settings page learns the user code from its own `login` answer, and
+    // a reload throws that answer away while the attempt keeps polling on the
+    // server. Reporting the pending attempt from `status` is what puts the
+    // code and the "open the page" button back on the card instead of
+    // stranding an authorization the user cannot finish.
+    const fetchFn = ((input: RequestInfo | URL) => {
+      const body = String(input) === MUSE_DEVICE_CODE_URL
+        ? {
+          device_code: 'dc-1',
+          user_code: 'ABCD-1234',
+          verification_uri: 'https://auth.meta.com/oidc/device',
+          verification_uri_complete: 'https://auth.meta.com/oidc/device?user_code=ABCD-1234',
+          interval: 30,
+          expires_in: 600,
+        }
+        : { error: 'authorization_pending' }
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
+    }) as typeof fetch
+    const deviceFlows = new DeviceFlowManager()
+    const attempt = await deviceFlows.start('muse', { ...museDeviceFlow(), fetchFn })
+    const controller = new SubscriptionsAuthController(
+      new OAuthFlowManager(), deviceFlows, () => {}, () => undefined, {}, () => undefined,
+    )
+    try {
+      const live = await controller.status('muse')
+      assert.equal(live.busy, true, 'the attempt is waiting for the authorization')
+      assert.deepEqual(live.pendingLogin, {
+        userCode: 'ABCD-1234',
+        // Meta's `verification_uri_complete` wins: the page carries the code.
+        verificationUrl: 'https://auth.meta.com/oidc/device?user_code=ABCD-1234',
+      }, 'the code card can be rebuilt from the status alone')
+
+      attempt.cancel()
+      await new Promise(resolve => setImmediate(resolve))
+      const settled = await controller.status('muse')
+      assert.equal(settled.busy, false)
+      assert.equal(settled.pendingLogin, undefined, 'a settled attempt reports no code')
+    } finally {
+      attempt.cancel()
     }
   })
 })

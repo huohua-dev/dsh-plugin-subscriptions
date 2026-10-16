@@ -237,8 +237,16 @@ export declare class ClaudeAdapter extends LlmAdapter {
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(provider: string): import("@deepseek-ai/dsh-llm").ResolvedRetryPolicy;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
+    /** Picker rows for discovered entries (the wire id doubles as the route id). */
+    private listed;
     /** The provider's own catalog: union of every account, or one account when named. */
     listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>;
+    /**
+     * One live model-list request for this account, bypassing every cache and
+     * every fallback: the Settings probe must report what this account's own
+     * proxy reached, and a cached or built-in catalog would say nothing.
+     */
+    probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */
     resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;

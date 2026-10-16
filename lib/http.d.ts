@@ -151,6 +151,32 @@ export declare function runWithAccountProxy<T>(route: AccountRoute, body: () => 
  * @returns the same chunks, in order, routed through the account's proxy.
  */
 export declare function withAccountProxy<T>(route: AccountRoute, source: AsyncIterable<T>): AsyncIterable<T>;
+/** What one {@link runAccountProxyProbe} call did. */
+export interface AccountProxyProbeOutcome<T> {
+    /** Whether `body` completed; {@link error} carries the reason when it did not. */
+    ok: boolean;
+    /** Whether the probe's requests went through an account proxy at all. */
+    viaProxy: boolean;
+    /** The body's value, when it completed. */
+    value?: T;
+    /** Failure message; a transport failure keeps undici's cause chain. */
+    error?: string;
+}
+/**
+ * Run one account probe with the proxy URL its Settings card currently shows,
+ * without saving it and without disturbing live routing.
+ *
+ * The probe gets its own throwaway dispatcher (closed when the call ends) and
+ * never touches the per-account dispatcher cache, so a URL that only exists in
+ * the dialog cannot leak into the account's real traffic. `url` undefined uses
+ * the account's saved proxy like any other account request; an empty string
+ * forces "no account proxy", which then follows the plugin-wide config.
+ * @param route - the probed account.
+ * @param url - the draft proxy URL, `''` for none, or undefined for the saved one.
+ * @param body - the probe; the fetches it awaits inherit the forced route.
+ * @returns the probe's outcome; failures are reported, never thrown.
+ */
+export declare function runAccountProxyProbe<T>(route: AccountRoute, url: string | undefined, body: () => Promise<T>): Promise<AccountProxyProbeOutcome<T>>;
 /**
  * The fetch caller all subscription code uses. An account-scoped request goes
  * through that account's own proxy when one is configured (the plugin-wide
@@ -162,6 +188,10 @@ export declare function withAccountProxy<T>(route: AccountRoute, source: AsyncIt
  * dispatcher always comes from the same undici build the request is issued
  * with — a mismatched dispatcher can be silently ignored by the host's global
  * fetch.
+ *
+ * A {@link runAccountProxyProbe} scope replaces the per-account branch above
+ * with its own throwaway proxy (or with none), so a probe can test an unsaved
+ * account proxy without changing what live traffic does.
  */
 export declare function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 /**

@@ -25,7 +25,7 @@ export declare const SUBSCRIPTIONS_AUTH_PREFIX = "subscriptions-auth.";
  * Every endpoint {@link dispatch} answers; each gets one exact Fetch route.
  * Kept in one place so the route table and the switch cannot drift apart.
  */
-export declare const SUBSCRIPTIONS_AUTH_ENDPOINTS: readonly ["providerSettings", "setProviderSettings", "status", "login", "manual", "cancel", "logout", "setDefault", "usage", "image", "video", "prepareReset", "consumeReset", "speed", "setSpeed", "proxyGet", "proxySet", "proxyTest", "modelDefaults", "setModelDefault"];
+export declare const SUBSCRIPTIONS_AUTH_ENDPOINTS: readonly ["providerSettings", "setProviderSettings", "status", "login", "manual", "cancel", "logout", "setDefault", "usage", "image", "video", "prepareReset", "consumeReset", "speed", "setSpeed", "proxyGet", "proxySet", "proxyTest", "accountModelsTest", "modelDefaults", "setModelDefault"];
 /** Decoded image bytes returned by the `image` endpoint. */
 export interface ImageBytesResult {
     mediaType: string;
@@ -138,6 +138,33 @@ export interface ProviderSettingsController {
     displayName?(provider: ProviderId): string | undefined;
     get(provider: ProviderId, force: boolean): Promise<unknown>;
     set(provider: ProviderId, settings: unknown): Promise<void>;
+    /**
+     * Fetch one account's model list live, through that account's own proxy.
+     * @param provider - the subscription the account belongs to.
+     * @param account - the account key.
+     * @param options - `proxy` is the Settings card's proxy field as typed, which
+     *   the probe must use even though it is not saved: a blank field means no
+     *   account proxy, an absent one means the account's saved proxy.
+     * @param signal - caller cancellation from the RPC transport.
+     * @returns what the live fetch returned, or why it failed. A failed probe is
+     *   a normal answer here, not an exception: that is what the button shows.
+     */
+    testAccountModels?(provider: ProviderId, account: string, options: {
+        proxy?: string;
+    }, signal: AbortSignal): Promise<AccountModelsTestResult>;
+}
+/** `accountModelsTest` endpoint value: one account's live model-list probe. */
+export interface AccountModelsTestResult {
+    /** Whether the provider answered through the probed route. */
+    ok: boolean;
+    /** Whether the probe left through an account proxy (the typed one, or the saved one). */
+    viaProxy: boolean;
+    /** Model ids the live request returned, in provider order. */
+    models: string[];
+    /** Round-trip latency in milliseconds. */
+    latencyMs: number;
+    /** Failure message, when nothing could be fetched. */
+    error?: string;
 }
 export interface ModelDefaultsController {
     /** Per-provider picker state for the Settings page. */

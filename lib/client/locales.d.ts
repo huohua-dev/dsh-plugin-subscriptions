@@ -25,6 +25,13 @@ export declare const en: {
     accountsProxy: string;
     accountsProxyPlaceholder: string;
     accountsProxyHint: string;
+    accountsProbe: string;
+    accountsProbeRunning: string;
+    accountsProbeHint: string;
+    accountsProbeOk: string;
+    accountsProbeOkDirect: string;
+    accountsProbeFail: string;
+    accountsProbeModels: string;
     accountsModels: string;
     accountsModelsAll: string;
     accountsModelsCount: string;
@@ -213,6 +220,13 @@ export declare const zh: {
     accountsProxy: string;
     accountsProxyPlaceholder: string;
     accountsProxyHint: string;
+    accountsProbe: string;
+    accountsProbeRunning: string;
+    accountsProbeHint: string;
+    accountsProbeOk: string;
+    accountsProbeOkDirect: string;
+    accountsProbeFail: string;
+    accountsProbeModels: string;
     accountsModels: string;
     accountsModelsAll: string;
     accountsModelsCount: string;

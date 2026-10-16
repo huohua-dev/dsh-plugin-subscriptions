@@ -359,6 +359,13 @@ export declare class MuseAdapter extends LlmAdapter {
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     /** The provider's own catalog: union of every account, or one account when named. */
     listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>;
+    /**
+     * One live model-list request for this account, bypassing every cache and
+     * every fallback (including the known catalog Meta gates some networks
+     * with): the Settings probe must report what this account's own proxy
+     * reached, and a stored or built-in catalog would say nothing.
+     */
+    probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
     private discovered;
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */

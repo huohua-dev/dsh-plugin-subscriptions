@@ -19,6 +19,7 @@ import { httpLlmError } from '../providers/common.js'
 import { AccountTokenManager } from '../providers/accounts.js'
 import type { FetchFn } from '../providers/common.js'
 import { proxiedFetch } from '../http.js'
+import { accountScoped } from '../providers/account-proxy.js'
 
 /** Endpoint the generation request is posted to. */
 export const VIDEO_GENERATE_URL = 'https://api.x.ai/v1/videos/generations'
@@ -251,18 +252,21 @@ export function createVideoGenerateTool(options: VideoGenerateToolOptions): Tool
     }),
     async execute(args, exec) {
       const body = buildVideoGenerateBody(args)
-      const session = await options.tokens.session()
+      // Grok tool calls follow the default account, proxy included — the
+      // submission and every status poll leave through the same route.
+      const account = await options.tokens.defaultAccount()
+      const session = await accountScoped('grok', account, () => options.tokens.session())
       const fetchFn = options.fetchFn ?? proxiedFetch
       const headers = {
         'authorization': `Bearer ${session.accessToken}`,
         'accept': 'application/json',
       }
-      const submit = await fetchFn(VIDEO_GENERATE_URL, {
+      const submit = await accountScoped('grok', account, () => fetchFn(VIDEO_GENERATE_URL, {
         method: 'POST',
         headers: { ...headers, 'content-type': 'application/json' },
         body: JSON.stringify(body),
         signal: exec.signal,
-      })
+      }))
       if (!submit.ok) throw await httpLlmError(submit, 'video_generate')
       const requestId = parseVideoStartResponse(await submit.json())
 
@@ -270,11 +274,11 @@ export function createVideoGenerateTool(options: VideoGenerateToolOptions): Tool
       let done: { url: string; duration?: number }
       for (;;) {
         await sleep(pollIntervalMs, exec.signal)
-        const poll = await fetchFn(videoStatusUrl(requestId), {
+        const poll = await accountScoped('grok', account, () => fetchFn(videoStatusUrl(requestId), {
           method: 'GET',
           headers,
           signal: exec.signal,
-        })
+        }))
         if (!poll.ok) throw await httpLlmError(poll, 'video_generate')
         const status = parseVideoStatusResponse(await poll.json())
         if (status.status === 'done') {

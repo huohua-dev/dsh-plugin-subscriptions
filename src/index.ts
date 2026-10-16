@@ -147,7 +147,8 @@ import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
-import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
+import { ensureConnectAttemptTimeout, invalidateAccountProxies, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout, setAccountProxyResolver } from './http.js'
+import { accountScoped, withAccountProxyScope } from './providers/account-proxy.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
@@ -766,6 +767,10 @@ export function apply(ctx: Context, config: Config): void {
   const previousAttemptTimeout = ensureConnectAttemptTimeout()
   ctx.effect(() => () => { restoreConnectAttemptTimeout(previousAttemptTimeout) }, 'dsh-plugin-subscriptions: connect attempt timeout')
   const preferences = new ProviderSettingsStore()
+  // Per-account proxies live in the provider settings; the HTTP layer reads
+  // them on every request of that account, so the lookup must stay live.
+  setAccountProxyResolver((provider, account) => preferences.accountProxy(provider as ProviderId, account))
+  ctx.effect(() => () => { setAccountProxyResolver(undefined) }, 'dsh-plugin-subscriptions: per-account proxies')
   const codexVersion = new CodexClientVersionCache()
   const claudeVersion = new ClaudeCliVersionCache()
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
@@ -827,6 +832,8 @@ export function apply(ctx: Context, config: Config): void {
     // state (isolation is already account-scoped — this is memory hygiene).
     if (provider === 'copilot') copilotAdapter?.clearReplayState()
     adapters.get(provider)?.clearAccountCatalog(account)
+    // A logged-out account's tunnel must not stay open on its account key.
+    void invalidateAccountProxies()
     poolHealth?.clear(provider, account)
     poolUsage?.invalidate(provider, account)
     poolAdapter?.invalidate()
@@ -857,7 +864,9 @@ export function apply(ctx: Context, config: Config): void {
   const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
-      provider, adapter, settings: preferences, pool: () => poolAdapter,
+      // One scope for the whole adapter: streams, token refreshes and catalog
+      // discovery then all leave through the serving account's own proxy.
+      provider, adapter: withAccountProxyScope(provider, adapter), settings: preferences, pool: () => poolAdapter,
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())
@@ -878,7 +887,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexTokens = tokens
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) => {
+        usageFetchers.codex = async (account, signal) => accountScoped('codex', account, async () => {
           const session = await tokens.session(account)
           const usage = await fetchCodexUsage(session, proxiedFetch, signal)
           try {
@@ -889,7 +898,7 @@ export function apply(ctx: Context, config: Config): void {
             const message = error instanceof Error ? error.message : String(error)
             return { ...usage, resetCreditsError: message }
           }
-        }
+        })
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
@@ -936,8 +945,8 @@ export function apply(ctx: Context, config: Config): void {
         })
         claudeTokens = tokens
         accountTokens.set('claude', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.claude = async (account, signal) =>
-          fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal, () => claudeVersion.resolve())
+        usageFetchers.claude = async (account, signal) => accountScoped('claude', account, async () =>
+          fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal, () => claudeVersion.resolve()))
         const adapter = new ClaudeAdapter({
           models: catalog.claude,
           streamIdleTimeoutMs,
@@ -972,8 +981,8 @@ export function apply(ctx: Context, config: Config): void {
         })
         grokTokens = tokens
         accountTokens.set('grok', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.grok = async (account, signal) =>
-          fetchGrokUsage(await tokens.session(account), proxiedFetch, signal)
+        usageFetchers.grok = async (account, signal) => accountScoped('grok', account, async () =>
+          fetchGrokUsage(await tokens.session(account), proxiedFetch, signal))
         const adapter = new GrokAdapter({
           models: catalog.grok,
           streamIdleTimeoutMs,
@@ -1038,9 +1047,8 @@ export function apply(ctx: Context, config: Config): void {
           onAccountRemoved: account => { authChanged('antigravity', account) },
         })
         accountTokens.set('antigravity', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.antigravity = async (account, signal) => fetchAntigravityUsage(
-          await tokens.session(account), config.antigravity, proxiedFetch, signal,
-        )
+        usageFetchers.antigravity = async (account, signal) => accountScoped('antigravity', account, async () =>
+          fetchAntigravityUsage(await tokens.session(account), config.antigravity, proxiedFetch, signal))
         const adapter = new AntigravityAdapter({
           models: catalog.antigravity,
           streamIdleTimeoutMs,
@@ -1074,10 +1082,10 @@ export function apply(ctx: Context, config: Config): void {
         accountTokens.set('muse', tokens as AccountTokenManager<StoredSession>)
         // The usage source is the idempotent key mint, authorized by the
         // identity token; peek avoids a pointless re-mint of the stored key.
-        usageFetchers.muse = async (account, signal) => {
+        usageFetchers.muse = async (account, signal) => accountScoped('muse', account, async () => {
           const session = await tokens.peek(account) ?? await tokens.session(account)
           return fetchMuseUsage(session, proxiedFetch, signal)
-        }
+        })
         const adapter = new MuseAdapter({
           models: catalog.muse,
           streamIdleTimeoutMs,
@@ -1123,25 +1131,26 @@ export function apply(ctx: Context, config: Config): void {
         }
         case 'claude': {
           const tokens = claudeTokens
-          return tokens === undefined ? undefined : async () =>
+          return tokens === undefined ? undefined : async () => accountScoped('claude', account, async () =>
             fetchClaudeUsage(
               await tokens.session(account),
               proxiedFetch,
               AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
               () => claudeVersion.resolve(),
-            )
+            ))
         }
         case 'grok': {
           const tokens = grokTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchGrokUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+          return tokens === undefined ? undefined : async () => accountScoped('grok', account, async () =>
+            fetchGrokUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS)))
         }
         case 'antigravity': {
           const tokens = accountTokens.get('antigravity')
-          return tokens === undefined ? undefined : async () => fetchAntigravityUsage(
-            await tokens.session(account) as AntigravitySession, config.antigravity, proxiedFetch,
-            AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
-          )
+          return tokens === undefined ? undefined : async () => accountScoped('antigravity', account, async () =>
+            fetchAntigravityUsage(
+              await tokens.session(account) as AntigravitySession, config.antigravity, proxiedFetch,
+              AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
+            ))
         }
         case 'muse': {
           const fetcher = usageFetchers.muse
@@ -1167,7 +1176,7 @@ export function apply(ctx: Context, config: Config): void {
             if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
               const models = await withTimeout(
-                signal => adapter.listOwnModels(provider, account, signal, true),
+                signal => accountScoped(provider, account, () => adapter.listOwnModels(provider, account, signal, true)),
                 POOL_USAGE_TIMEOUT_MS,
               )
               const settings = preferences.get(provider).accounts
@@ -1328,7 +1337,8 @@ export function apply(ctx: Context, config: Config): void {
     },
     async (account, creditId, requestId, signal) => {
       if (!codexTokens) throw new BadRequest('Codex unavailable')
-      await consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal)
+      await accountScoped('codex', account, async () =>
+        consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal))
     },
     account => poolUsage?.invalidate('codex', account),
   )
@@ -1366,7 +1376,10 @@ export function apply(ctx: Context, config: Config): void {
       const accounts = await accountTokens.get(provider)?.list() ?? []
       const accountCatalogs = await Promise.all(accounts.map(async account => ({
         account: account.key,
-        models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal, !force), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
+        models: await withTimeout(
+          signal => accountScoped(provider, account.key, () => adapter.listOwnModels(provider, account.key, signal, !force)),
+          DISCOVERY_TIMEOUT_MS,
+        ).catch(() => undefined),
       })))
       const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
       const rows = await Promise.all(models.map(async model => {
@@ -1410,6 +1423,9 @@ export function apply(ctx: Context, config: Config): void {
         throw new BadRequest(error instanceof Error ? error.message : String(error))
       }
       await preferences.set(provider, validated)
+      // A saved account proxy replaces the cached dispatcher of every account
+      // whose URL changed, so the next request opens a new tunnel.
+      await invalidateAccountProxies()
       poolAdapter?.invalidate()
       for (const [route, handle] of handles) handle.replace([route])
     },
@@ -1437,7 +1453,7 @@ export function apply(ctx: Context, config: Config): void {
       void tokens.list().then((accounts) => {
         for (const { key, session } of accounts) {
           if (session.keychainBound !== true) continue
-          tokens.session(key).catch(() => {
+          accountScoped('claude', key, () => tokens.session(key)).catch(() => {
             // Best-effort: TokenManager already surfaces failures via onRemoved.
           })
         }
@@ -1460,6 +1476,7 @@ export function apply(ctx: Context, config: Config): void {
     ctx.inject(['web'], webCtx => {
       webCtx.web.registerSearchProvider(new CodexWebSearchProvider({
         tokens,
+        defaultAccount: () => tokens.defaultAccount(),
         enabled: () => preferences.toolEnabled('codex', 'web_search'),
         fetchFn: proxiedFetch,
       }))

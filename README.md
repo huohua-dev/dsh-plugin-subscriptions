@@ -313,6 +313,15 @@ Logging in a brand-new account is the one exception: the OAuth token exchange ha
 
 An account with the field blank follows the plugin-wide proxy (and DSH's own network settings when that is disabled). An account with a proxy does **not** consult the plugin-wide bypass list: naming a proxy per account is an explicit choice for that account's traffic. A proxy that cannot be reached fails the request — it never silently falls back to a direct connection. Saving takes effect on the next request; no restart, and no pools or sessions are disturbed.
 
+#### Testing one account's proxy
+
+Every account card also has a **Test model fetch** button: one live model-list request for that account alone, reported on the card (model count, latency and the route actually used on success; the cause on failure). It answers one question per account — *can this account pull models through its own proxy?*
+
+- **It tests what the field says, saving not required.** An unsaved proxy URL is used for that probe only, through a throwaway tunnel; the account's live traffic keeps using the stored setting. A blank field means this probe deliberately takes no account proxy, so it exercises DSH's own network settings even when a proxy is saved.
+- **One account per click.** No sibling account, pool or session is touched, so one account's broken proxy can never be masked by another's working one.
+- **No cache in, no cache out.** The probe is a real request: a cached or built-in catalog is never replayed as success, and the probe does not rewrite the saved model lists (those still refresh on the normal schedule, or via "Refresh model lists").
+- **The answer is checkable.** Success reports whether the request left through the account proxy or DSH's network settings; a failure names the cause (`connect ECONNREFUSED`, an unsupported proxy scheme, a revoked login), so "the proxy is unreachable" is never confused with "the account is logged out". A token that expired on its own is refreshed during the probe, exactly as a normal request would.
+
 ## Related plugins
 
 This plugin only supplies model routes. Approval policy lives elsewhere:

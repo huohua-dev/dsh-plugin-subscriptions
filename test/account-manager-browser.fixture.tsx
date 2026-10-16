@@ -8,6 +8,7 @@ state.settings = { visibleModels: ['alpha'], accounts: {} }
 state.failSave = false
 state.saved = []
 state.efforts = []
+state.probes = []
 const rpc = { call: async (_channel: string, endpoint: string, payload: any) => {
   if (endpoint.endsWith('.setProviderSettings')) {
     if (state.failSave) return { ok: false, error: { message: 'Simulated save failure' } }
@@ -16,6 +17,14 @@ const rpc = { call: async (_channel: string, endpoint: string, payload: any) => 
     return { ok: true, value: {} }
   }
   if (endpoint.endsWith('.setModelDefault')) { state.efforts.push(payload); return { ok: true, value: {} } }
+  if (endpoint.endsWith('.accountModelsTest')) {
+    state.probes.push({ account: payload.account, proxy: payload.proxy })
+    const typed = String(payload.proxy ?? '').trim()
+    if (typed.includes('broken')) {
+      return { ok: true, value: { ok: false, viaProxy: true, models: [], latencyMs: 812, error: 'fetch failed → connect ECONNREFUSED 127.0.0.1:1080' } }
+    }
+    return { ok: true, value: { ok: true, viaProxy: typed !== '', models: ['gpt-5.4', 'gpt-5.1-codex'], latencyMs: 243 } }
+  }
   return { ok: true, value: { settings: structuredClone(state.settings), tools: ['image_generate'], models: [
     { id: 'alpha', name: 'Alpha', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], standardContextWindow: 400000, defaultContextWindow: 1000000, maxContextWindow: 1000000 },
     { id: 'beta', name: 'Beta' },

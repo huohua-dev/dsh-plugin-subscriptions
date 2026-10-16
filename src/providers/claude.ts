@@ -795,6 +795,16 @@ export class ClaudeAdapter extends LlmAdapter {
     return [...own, ...extra.filter(model => !seen.has(model.id))]
   }
 
+  /** Picker rows for discovered entries (the wire id doubles as the route id). */
+  private listed(provider: string, models: readonly DiscoveredModel[]): LlmModelInfo[] {
+    return models.map(model => ({
+      provider,
+      id: model.id,
+      name: model.name,
+      inputModalities: CLAUDE_MODALITIES,
+    }))
+  }
+
   /** The provider's own catalog: union of every account, or one account when named. */
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached = false): Promise<readonly LlmModelInfo[]> {
     if (account === undefined) {
@@ -817,12 +827,7 @@ export class ClaudeAdapter extends LlmAdapter {
         catalog,
         () => this.fetchCatalog(account, signal),
       ), preferCached)
-      return models.map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        inputModalities: CLAUDE_MODALITIES,
-      }))
+      return this.listed(provider, models)
     } catch (error: unknown) {
       if (isDiscoveryAborted(error, signal)) throw error
       if (isMissingOrInvalidCredential(error)) return []
@@ -831,6 +836,16 @@ export class ClaudeAdapter extends LlmAdapter {
       )
       return this.staticModels(provider)
     }
+  }
+
+  /**
+   * One live model-list request for this account, bypassing every cache and
+   * every fallback: the Settings probe must report what this account's own
+   * proxy reached, and a cached or built-in catalog would say nothing.
+   */
+  async probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    if (!this.options.discovery) return this.staticModels(provider)
+    return this.listed(provider, await this.fetchCatalog(account, signal))
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {

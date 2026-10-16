@@ -147,7 +147,7 @@ import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
-import { ensureConnectAttemptTimeout, invalidateAccountProxies, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout, setAccountProxyResolver } from './http.js'
+import { ensureConnectAttemptTimeout, invalidateAccountProxies, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout, runAccountProxyProbe, setAccountProxyResolver } from './http.js'
 import { accountScoped, withAccountProxyScope } from './providers/account-proxy.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
 
@@ -1428,6 +1428,33 @@ export function apply(ctx: Context, config: Config): void {
       await invalidateAccountProxies()
       poolAdapter?.invalidate()
       for (const [route, handle] of handles) handle.replace([route])
+    },
+    // One account's live model fetch, through that account's own proxy — the
+    // Settings card's field, whether it is saved or still a draft. It skips the
+    // catalog cache and every fallback on purpose: a cached or built-in catalog
+    // would report success for a proxy that cannot reach the provider at all.
+    async testAccountModels(provider, account, options, signal) {
+      const adapter = adapters.get(provider)
+      const probe = adapter?.probeOwnModels?.bind(adapter)
+      if (probe === undefined) throw new BadRequest(`provider ${provider} cannot probe its accounts`)
+      const started = Date.now()
+      const outcome = await runAccountProxyProbe({ provider, account }, options.proxy, async () => {
+        if (signal.aborted) throw new Error('the probe was cancelled')
+        const models = await withTimeout(
+          timeout => probe(provider, account, signal.aborted ? timeout : AbortSignal.any([timeout, signal])),
+          DISCOVERY_TIMEOUT_MS,
+        )
+        // withTimeout resolves undefined once its deadline fires.
+        if (models === undefined) throw new Error(`no answer within ${Math.round(DISCOVERY_TIMEOUT_MS / 1000)} s`)
+        return models
+      })
+      return {
+        ok: outcome.ok,
+        viaProxy: outcome.viaProxy,
+        models: outcome.value?.map(model => model.id) ?? [],
+        latencyMs: Date.now() - started,
+        ...outcome.error === undefined ? {} : { error: outcome.error },
+      }
     },
   })
 

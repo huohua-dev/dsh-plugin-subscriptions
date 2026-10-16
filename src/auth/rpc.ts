@@ -40,7 +40,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
   'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
-  'proxyGet', 'proxySet', 'proxyTest',
+  'proxyGet', 'proxySet', 'proxyTest', 'accountModelsTest',
   'modelDefaults', 'setModelDefault',
 ] as const
 
@@ -162,6 +162,32 @@ export interface ProviderSettingsController {
   displayName?(provider: ProviderId): string | undefined
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
+  /**
+   * Fetch one account's model list live, through that account's own proxy.
+   * @param provider - the subscription the account belongs to.
+   * @param account - the account key.
+   * @param options - `proxy` is the Settings card's proxy field as typed, which
+   *   the probe must use even though it is not saved: a blank field means no
+   *   account proxy, an absent one means the account's saved proxy.
+   * @param signal - caller cancellation from the RPC transport.
+   * @returns what the live fetch returned, or why it failed. A failed probe is
+   *   a normal answer here, not an exception: that is what the button shows.
+   */
+  testAccountModels?(provider: ProviderId, account: string, options: { proxy?: string }, signal: AbortSignal): Promise<AccountModelsTestResult>
+}
+
+/** `accountModelsTest` endpoint value: one account's live model-list probe. */
+export interface AccountModelsTestResult {
+  /** Whether the provider answered through the probed route. */
+  ok: boolean
+  /** Whether the probe left through an account proxy (the typed one, or the saved one). */
+  viaProxy: boolean
+  /** Model ids the live request returned, in provider order. */
+  models: string[]
+  /** Round-trip latency in milliseconds. */
+  latencyMs: number
+  /** Failure message, when nothing could be fetched. */
+  error?: string
 }
 
 export interface ModelDefaultsController {
@@ -521,6 +547,21 @@ function readProxyTestPayload(payload: unknown): { url?: string; proxy?: ProxyDr
   }
 }
 
+/**
+ * Validate an `accountModelsTest` payload. The optional `proxy` is the Settings
+ * card's field as typed, so a probe can run before the user saves it.
+ */
+function readAccountModelsTestPayload(payload: unknown): { provider: ProviderId; account: string; proxy?: string } {
+  if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
+  const provider = readProvider(payload)
+  const account = readString(payload, 'account')
+  const proxy = (payload as Record<string, unknown>).proxy
+  if (proxy !== undefined && typeof proxy !== 'string') {
+    throw new BadRequest('payload.proxy must be a string when present')
+  }
+  return { provider, account, ...proxy === undefined ? {} : { proxy } }
+}
+
 async function dispatch(
   controller: AuthController,
   speed: SpeedController,
@@ -608,6 +649,11 @@ async function dispatch(
     case 'proxyTest':
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
       return ok(await proxy.test(readProxyTestPayload(payload)))
+    case 'accountModelsTest': {
+      if (providerSettings?.testAccountModels === undefined) throw new BadRequest('account model probes are unavailable')
+      const probe = readAccountModelsTestPayload(payload)
+      return ok(await providerSettings.testAccountModels(probe.provider, probe.account, probe, signal))
+    }
     case 'modelDefaults': {
       if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
       return ok(await modelDefaults.catalog(readForce(payload)))

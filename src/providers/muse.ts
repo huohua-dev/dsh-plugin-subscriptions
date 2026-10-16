@@ -993,6 +993,17 @@ export class MuseAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * One live model-list request for this account, bypassing every cache and
+   * every fallback (including the known catalog Meta gates some networks
+   * with): the Settings probe must report what this account's own proxy
+   * reached, and a stored or built-in catalog would say nothing.
+   */
+  async probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    if (!this.options.discovery) return this.staticModels(provider)
+    return this.listed(provider, await this.fetchCatalog(account, signal))
+  }
+
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
     const accounts = (await this.options.tokens.list()).map(entry => entry.key)

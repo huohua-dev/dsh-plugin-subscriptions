@@ -30,6 +30,21 @@ const border = '0.5px solid var(--dsw-alias-border-l2)'
 const stack: CSSProperties = { display: 'grid', gap: 12, minWidth: 0 }
 const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
 
+/** `accountModelsTest` endpoint value: one account's live model-list probe. */
+interface AccountModelsTestResult {
+  ok: boolean
+  /** Whether the probe left through an account proxy rather than DSH's own routing. */
+  viaProxy: boolean
+  models: string[]
+  latencyMs: number
+  error?: string
+}
+
+/** Per-account probe state: running, or the answer the button last produced. */
+type AccountProbeState = { running: true } | { running: false; result: AccountModelsTestResult }
+/** Model ids listed inline after a successful probe; the rest are only counted. */
+const PROBE_PREVIEW = 6
+
 /** Native top-layer dialog provides keyboard containment, Escape and focus restoration. */
 export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null)
@@ -49,8 +64,11 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   /** '' follows the plugin config; otherwise an explicit TTL. */
   const [cacheTtl, setCacheTtl] = useState<PromptCacheTtlSetting | ''>('')
   const [cacheTtlDirty, setCacheTtlDirty] = useState(false)
+  const [probes, setProbes] = useState<Record<string, AccountProbeState>>({})
   const alive = useRef(true)
   const saveLock = useRef(false)
+  /** One in-flight probe per account; a second click while one runs is a no-op. */
+  const probeLocks = useRef(new Set<string>())
   const editor = useRef<ProviderModelEditorHandle>(null)
   useEffect(() => {
     alive.current = true
@@ -77,6 +95,31 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
 
   function edit(key: string, next: AccountPreferences) {
     setChanges(current => ({ ...current, [key]: next }))
+  }
+  /**
+   * Fetch one account's model list live, through the proxy typed above it. The
+   * draft goes out with the request, so a new proxy can be proven before it is
+   * saved; the host answers with what came back rather than throwing.
+   */
+  async function probe(key: string) {
+    if (probeLocks.current.has(key)) return
+    probeLocks.current.add(key)
+    const field = changes[key] ?? catalog?.settings.accounts?.[key] ?? {}
+    setProbes(current => ({ ...current, [key]: { running: true } }))
+    try {
+      const result = await callSubscriptionsAuth<AccountModelsTestResult>(rpc, 'accountModelsTest', {
+        provider, account: key, proxy: field.proxy ?? '',
+      })
+      if (alive.current) setProbes(current => ({ ...current, [key]: { running: false, result } }))
+    } catch (error) {
+      // The endpoint itself is unreachable (older host, transport failure):
+      // report it on the card instead of dropping the click.
+      const message = error instanceof Error ? error.message : String(error)
+      const result: AccountModelsTestResult = { ok: false, viaProxy: false, models: [], latencyMs: 0, error: message }
+      if (alive.current) setProbes(current => ({ ...current, [key]: { running: false, result } }))
+    } finally {
+      probeLocks.current.delete(key)
+    }
   }
   /**
    * One submit for both drafts: the model editor's (visibility, effort,
@@ -166,6 +209,8 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
           const selected = accountPoolSelection(preferences, account.models)
           const models = accountModelRows(account, preferences)
+          const probeState = probes[account.key]
+          const probeResult = probeState?.running === false ? probeState.result : undefined
           return <fieldset key={account.key} style={{ ...stack, border, borderRadius: 'var(--dsw-radius-lg, 12px)', padding: 14, margin: 0 }}>
             <legend style={{ padding: '0 6px', overflowWrap: 'anywhere', maxWidth: '100%' }}>{account.label}</legend>
             {account.unavailable && <p className="dsh-subscription-hint">{t('accountsCatalogUnavailable')}</p>}
@@ -193,6 +238,29 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
                 }} />
               <small className="dsh-subscription-hint">{t('accountsProxyHint')}</small>
             </label>
+            {/* Proves one account's own route: the field above is used as typed,
+                saved or not, and the answer lands on this card only. */}
+            <div style={{ ...actions, justifyContent: 'space-between' }}>
+              <button type="button" disabled={probeState?.running === true}
+                onClick={() => { void probe(account.key) }}>
+                {probeState?.running === true ? t('accountsProbeRunning') : t('accountsProbe')}
+              </button>
+              <small className="dsh-subscription-hint">{t('accountsProbeHint')}</small>
+            </div>
+            {probeResult !== undefined && <>
+              <p role={probeResult.ok ? 'status' : 'alert'}>
+                {probeResult.ok
+                  ? t(probeResult.viaProxy ? 'accountsProbeOk' : 'accountsProbeOkDirect', {
+                    count: String(probeResult.models.length), ms: String(probeResult.latencyMs),
+                  })
+                  : t('accountsProbeFail', { message: probeResult.error ?? '' })}
+              </p>
+              {probeResult.ok && probeResult.models.length > 0 && <small className="dsh-subscription-hint"
+                style={{ overflowWrap: 'anywhere' }}>{t('accountsProbeModels', {
+                  models: `${probeResult.models.slice(0, PROBE_PREVIEW).join(', ')}${probeResult.models.length > PROBE_PREVIEW
+                    ? ` (+${probeResult.models.length - PROBE_PREVIEW})` : ''}`,
+                })}</small>}
+            </>}
             <label><input type="checkbox" checked={preferences.poolEnabled !== false}
               onChange={event => edit(account.key, { ...preferences, poolEnabled: event.target.checked })} /> {t('accountsPoolEnabled')}</label>
             <label><input type="checkbox" checked={preferences.independentEntry === true}

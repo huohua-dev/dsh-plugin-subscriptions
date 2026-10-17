@@ -403,7 +403,9 @@ export declare class MuseAdapter extends LlmAdapter {
      * response's message (block indexes carry on from it); a text-only answer
      * means the model really was done, so it is dropped unseen and the first
      * reply stands. The continuation is best effort: a failure before it has
-     * produced output leaves the turn exactly as the model ended it.
+     * produced output leaves the turn exactly as the model ended it, but a
+     * transient transport failure is retried (see {@link MUSE_CONTINUATION_ATTEMPTS})
+     * because the route is flaky enough that the step's own request may retry too.
      * @returns the second response and whether it was kept, or undefined when
      *   the request itself failed.
      */

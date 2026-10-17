@@ -14,6 +14,18 @@ import { createFakeConnection } from './fake-connection.js'
 import * as plugin from '../src/index.js'
 
 const settle = () => new Promise(resolve => setImmediate(resolve))
+/**
+ * Spin the real event loop until `ready` holds. The spec mocks Date and
+ * setTimeout, so the budget cannot come from a wall-clock timer; `performance`
+ * keeps ticking, which gives the plugin's real file I/O (auth and catalog
+ * stores) as long as it needs on a loaded runner instead of a fixed number of
+ * event-loop turns.
+ */
+async function settleUntil(ready: () => boolean, timeoutMs = 15_000): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs
+  while (!ready() && performance.now() < deadline) await settle()
+  return ready()
+}
 const now = 1_800_000_000_000
 
 function saved(ageMs: number) {
@@ -131,7 +143,7 @@ test('registered plugin refreshes at startup and hourly, while menus and disposa
     await saveAccountSession('codex', 'c', { accessToken: 'c', refreshToken: 'c', expiresAt: now + 86_400_000, accountId: 'c' })
     await catalogStore('codex').save({ at: now - 360_000, models: [{ id: 'cached', name: 'Cached', contextWindow: 1000 }] })
     runtime = ctx.plugin(plugin, { providers: ['codex'] })
-    for (let i = 0; i < 500 && requests === 0; i++) await settle()
+    await settleUntil(() => requests !== 0)
     assert.equal(requests, 1, 'plugin startup must schedule discovery without opening a menu')
     for (let i = 0; i < 30; i++) await settle()
     t.mock.timers.tick(6 * 60_000)
@@ -141,7 +153,7 @@ test('registered plugin refreshes at startup and hourly, while menus and disposa
     }
     assert.equal(requests, 1, 'six-minute-old cached menu reads do not fetch')
     t.mock.timers.tick(54 * 60_000)
-    for (let i = 0; i < 500 && requests < 2; i++) await settle()
+    await settleUntil(() => requests >= 2)
     // The hour is counted from when the job's first run COMPLETES, and that
     // run does real file I/O (auth and catalog stores) the fixed settle
     // budget above cannot bound on a loaded CI runner; if it finished during

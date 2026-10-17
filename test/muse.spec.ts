@@ -737,15 +737,15 @@ test('nothing is continued for an answer, a long reply, a complete tool call, or
   assert.equal(off.chunks.at(-1)?.type, 'finish')
 })
 
-test('a failed continuation leaves the turn as the model ended it, but a cancellation still propagates', async () => {
+test('a refused continuation leaves the turn as the model ended it, but a cancellation still propagates', async () => {
   const warnings: string[] = []
-  const refused = recordingFetch((_url, _init, index) => index === 0 ? sse(ANNOUNCEMENT_EVENTS) : json({ error: { message: 'busy' } }, 500))
+  const refused = recordingFetch((_url, _init, index) => index === 0 ? sse(ANNOUNCEMENT_EVENTS) : json({ error: { message: 'bad request' } }, 400))
   const chunks = await collect(continuingAdapter(refused.fetchFn, { warnings }).stream(MID_LOOP()))
-  assert.equal(refused.calls.length, 2)
+  assert.equal(refused.calls.length, 2, 'a 4xx refusal is not retried')
   const finish = chunks.at(-1)
   assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop')
   assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), '现在跑第一档：')
-  assert.ok(warnings.some(message => /continuation .* refused \(HTTP 500\)/.test(message)), warnings.join('\n'))
+  assert.ok(warnings.some(message => /continuation .* refused \(HTTP 400\)/.test(message)), warnings.join('\n'))
 
   const controller = new AbortController()
   const cancelled = recordingFetch(() => sse(ANNOUNCEMENT_EVENTS))
@@ -760,4 +760,31 @@ test('a failed continuation leaves the turn as the model ended it, but a cancell
     collect(continuingAdapter(aborting).stream({ ...MID_LOOP(), signal: controller.signal } as unknown as GenerateOptions)),
     (error: Error & { code?: string }) => error.code === 'ABORTED',
   )
+})
+
+test('a continuation retries a transient failure instead of ending the turn', async () => {
+  // Recorded 2026-10-17: the step's own request needed two transport retries,
+  // then the continuation request died the same way and the user had to type
+  // "continue" for a tool that had already announced itself.
+  const refusedOnce = recordingFetch((_url, _init, index) => {
+    if (index === 0) return sse(ANNOUNCEMENT_EVENTS)
+    if (index === 1) return json({ error: { message: 'busy' } }, 503)
+    return sse(TOOL_CALL_EVENTS)
+  })
+  const first = await collect(continuingAdapter(refusedOnce.fetchFn).stream(MID_LOOP()))
+  assert.equal(refusedOnce.calls.length, 3, 'a 5xx continuation is retried once')
+  const finish = first.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'tool-calls')
+
+  let count = 0
+  const cutOnce = ((_input: RequestInfo | URL, _init?: RequestInit) => {
+    count += 1
+    if (count === 1) return Promise.resolve(sse(ANNOUNCEMENT_EVENTS))
+    if (count === 2) return Promise.reject(new TypeError('fetch failed: other side closed'))
+    return Promise.resolve(sse(TOOL_CALL_EVENTS))
+  }) as typeof fetch
+  const second = await collect(continuingAdapter(cutOnce).stream(MID_LOOP()))
+  assert.equal(count, 3, 'a transport cut on the continuation is retried')
+  const end = second.at(-1)
+  assert.ok(end?.type === 'finish' && end.reason.kind === 'tool-calls')
 })

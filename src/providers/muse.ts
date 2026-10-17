@@ -556,6 +556,18 @@ export const MUSE_DANGLING_STOP_NOTICE = '[automatic notice] Your previous reply
 export const MUSE_DANGLING_STOP_MAX_CHARS = 300
 
 /**
+ * Attempts at the early-stop continuation before the turn ends as the model
+ * ended it. The same flaky route that makes the first request of a step retry
+ * (a transport cut) must not swallow the continuation silently: recorded
+ * 2026-10-17, a continuation request died 10.7 s after a step whose first
+ * request had already needed two retries, and the user had to type "continue".
+ */
+const MUSE_CONTINUATION_ATTEMPTS = 3
+
+/** Waits between continuation attempts; only transient failures reach them. */
+const MUSE_CONTINUATION_RETRY_MS: readonly number[] = [400, 1_200]
+
+/**
  * A last sentence that hands control to the user on purpose: a question or an
  * offer. `你看` counts only when it asks the user to look ("你看呢/你看看");
  * inside a description ("你看到的报错来自那一层") it is not a hand-back. A
@@ -1255,7 +1267,9 @@ export class MuseAdapter extends LlmAdapter {
    * response's message (block indexes carry on from it); a text-only answer
    * means the model really was done, so it is dropped unseen and the first
    * reply stands. The continuation is best effort: a failure before it has
-   * produced output leaves the turn exactly as the model ended it.
+   * produced output leaves the turn exactly as the model ended it, but a
+   * transient transport failure is retried (see {@link MUSE_CONTINUATION_ATTEMPTS})
+   * because the route is flaky enough that the step's own request may retry too.
    * @returns the second response and whether it was kept, or undefined when
    *   the request itself failed.
    */
@@ -1267,43 +1281,55 @@ export class MuseAdapter extends LlmAdapter {
     send: (body: () => string) => Promise<Response>
     watchdog: IdleWatchdog
   }): AsyncGenerator<StreamChunk, { outcome: MuseStreamOutcome; kept: boolean } | undefined> {
-    const { options, first, watchdog } = input
-    const second = newOutcome()
-    // Chunks wait here until the response proves it is a tool call; text
-    // before that point is dropped with a text-only answer.
-    const held: StreamChunk[] = []
-    let committed = false
-    try {
-      const response = await input.send(input.bodyOf([
-        ...input.history,
-        { role: 'assistant', content: [{ type: 'text', text: first.text.join('\n\n') }] },
-        { role: 'user', content: [{ type: 'text', text: MUSE_DANGLING_STOP_NOTICE }] },
-      ]))
-      if (!response.ok || response.body === null) {
-        await response.body?.cancel().catch(() => undefined)
-        this.options.onWarn?.(`muse continuation of a short text-only reply was refused (HTTP ${String(response.status)}); the turn ends as the model ended it`)
-        return undefined
-      }
-      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, captureInto(second))) {
-        recordChunk(second, chunk)
-        if (chunk.type === 'usage' || chunk.type === 'finish') continue
-        const placed = shiftedChunk(chunk, first.blocks)
-        if (committed) { yield placed; continue }
-        held.push(placed)
-        if (chunk.type === 'block-start' && chunk.blockType === 'tool-call') {
-          committed = true
-          yield* held
-          held.length = 0
+    const { first, watchdog } = input
+    const body = input.bodyOf([
+      ...input.history,
+      { role: 'assistant', content: [{ type: 'text', text: first.text.join('\n\n') }] },
+      { role: 'user', content: [{ type: 'text', text: MUSE_DANGLING_STOP_NOTICE }] },
+    ])
+    let failure: unknown
+    for (let attempt = 0; attempt < MUSE_CONTINUATION_ATTEMPTS; attempt++) {
+      const second = newOutcome()
+      // Chunks wait here until the response proves it is a tool call; text
+      // before that point is dropped with a text-only answer.
+      const held: StreamChunk[] = []
+      let committed = false
+      try {
+        const response = await input.send(body)
+        if (!response.ok || response.body === null) {
+          await response.body?.cancel().catch(() => undefined)
+          if (response.status < 500) {
+            this.options.onWarn?.(`muse continuation of a short text-only reply was refused (HTTP ${String(response.status)}); the turn ends as the model ended it`)
+            return undefined
+          }
+          failure = new Error(`HTTP ${String(response.status)}`)
+        } else {
+          for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, captureInto(second))) {
+            recordChunk(second, chunk)
+            if (chunk.type === 'usage' || chunk.type === 'finish') continue
+            const placed = shiftedChunk(chunk, first.blocks)
+            if (committed) { yield placed; continue }
+            held.push(placed)
+            if (chunk.type === 'block-start' && chunk.blockType === 'tool-call') {
+              committed = true
+              yield* held
+              held.length = 0
+            }
+          }
+          return { outcome: second, kept: committed }
         }
+      } catch (error: unknown) {
+        // Once the continuation has started to reach the harness, or when the
+        // request was cancelled, the failure belongs to the caller.
+        if (committed || watchdog.signal.aborted) throw error
+        failure = error
       }
-    } catch (error: unknown) {
-      // Once the continuation has started to reach the harness, or when the
-      // request was cancelled, the failure belongs to the caller.
-      if (committed || watchdog.signal.aborted) throw error
-      this.options.onWarn?.(`muse continuation of a short text-only reply failed (${errorChain(error)}); the turn ends as the model ended it`)
-      return undefined
+      const wait = MUSE_CONTINUATION_RETRY_MS[attempt]
+      if (wait === undefined) break
+      await sleep(wait, watchdog.signal)
     }
-    return { outcome: second, kept: committed }
+    this.options.onWarn?.(`muse continuation of a short text-only reply failed (${errorChain(failure)}); the turn ends as the model ended it`)
+    return undefined
   }
 
   private request(body: string, session: MuseSession, sessionId: GenerateOptions['sessionId'], signal: AbortSignal): Promise<Response> {

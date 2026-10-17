@@ -242,6 +242,12 @@ export declare const MUSE_DANGLING_STOP_MAX_CHARS = 300;
  * reply that neither announces nor claims to be finished is treated as dangling
  * too, because the cost of being wrong is one extra request whose answer is
  * dropped when the model really was done.
+ *
+ * The hand-back test looks at the last sentence only. A recorded premature stop
+ * read "…你看到的不兼容报错来自那一层。我把那段判定逻辑完整抠出来看。" — the
+ * mention of "你看到" is a description, not a question — and a whole-reply test
+ * threw the stop away, so the user had to type "continue". Only the sentence
+ * that would carry the question can hand control back.
  * @param text - the reply's text blocks, joined.
  * @returns true when the turn most likely ended early.
  */

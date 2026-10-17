@@ -19,6 +19,7 @@ import {
   completeMuseLogin,
   fetchMuseModels,
   isMusePermanentRefreshError,
+  museAnnouncesAction,
   museDeviceFlow,
   museDanglingText,
   museHeaders,
@@ -571,6 +572,19 @@ test('only the last sentence can hand control back to the user', () => {
   assert.equal(museDanglingText('你看这样改行不行？'), false)
 })
 
+test('museAnnouncesAction catches an announcement at the start of a turn, and only that', () => {
+  // Recorded 2026-10-17: the user typed "创建v0.2.2 tag" and the turn stopped here.
+  assert.equal(museAnnouncesAction('我来给当前已推送的提交创建 `v0.2.2` 标签并推送。'), true)
+  assert.equal(museAnnouncesAction('现在跑三档重绘：'), true)
+  assert.equal(museAnnouncesAction('目前正在逐模块覆盖剩余面。'), true)
+  // A reply to the user is not continued unless it announces an action.
+  assert.equal(museAnnouncesAction('我是 **muse-wonder-full-1.0**，运行在 DeepSeek Harness 里的编码 Agent。'), false)
+  assert.equal(museAnnouncesAction('修好了。'), false)
+  assert.equal(museAnnouncesAction('要我现在就开始实现吗？'), false)
+  assert.equal(museAnnouncesAction('If you want, I can run the tests next.'), false)
+  assert.equal(museAnnouncesAction('已完成，测试全部通过。'), false)
+})
+
 test('museMidToolLoop is true only while the newest real input is a tool result', () => {
   const assistant = assistantTurn(undefined)
   const injected = {
@@ -669,6 +683,19 @@ test('a continuation that only answers in text is dropped: the model really was 
   assert.deepEqual(usage?.type === 'usage' ? usage.usage : undefined, { inputTokens: 40, cacheReadTokens: 60, outputTokens: 13 })
 })
 
+test('an announcement on the first step after the user message is continued too', async () => {
+  const { calls, fetchFn } = recordingFetch((_url, _init, index) => sse(index === 0 ? ANNOUNCEMENT_EVENTS : TOOL_CALL_EVENTS))
+  const chunks = await collect(continuingAdapter(fetchFn).stream({
+    provider: 'muse', model: 'muse-spark-1.3', tools: TOOLS, sessionId: 's-1', messages: [USER],
+  } as unknown as GenerateOptions))
+  assert.equal(calls.length, 2)
+  const second = inputOf(calls[1])
+  assert.equal(second.at(-2)?.content?.[0]?.text, '现在跑第一档：')
+  assert.equal(second.at(-1)?.content?.[0]?.text, MUSE_DANGLING_STOP_NOTICE)
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'tool-calls')
+})
+
 test('text the continuation writes before its tool call joins the message', async () => {
   const withText = [
     { type: 'response.output_text.delta', item_id: 'msg_2', delta: '开始。' },
@@ -687,14 +714,14 @@ test('text the continuation writes before its tool call joins the message', asyn
   assert.deepEqual(ends.map(chunk => chunk.index), [0, 1, 2])
 })
 
-test('nothing is continued for a reply to the user, a long answer, a complete tool call, or with the option off', async () => {
+test('nothing is continued for an answer, a long reply, a complete tool call, or with the option off', async () => {
   const run = async (options: GenerateOptions, events: unknown[], adapterOptions: { continueDanglingStop?: boolean } = {}) => {
     const { calls, fetchFn } = recordingFetch(() => sse(events))
     const chunks = await collect(continuingAdapter(fetchFn, adapterOptions).stream(options))
     return { calls: calls.length, chunks }
   }
   const fresh = { provider: 'muse', model: 'muse-spark-1.3', tools: TOOLS, messages: [USER] } as unknown as GenerateOptions
-  assert.equal((await run(fresh, ANNOUNCEMENT_EVENTS)).calls, 1, 'a fresh user message starts a turn: an answer, not a stop')
+  assert.equal((await run(fresh, TEXT_EVENTS)).calls, 1, 'a short answer to the user is not a stop')
 
   const long = [
     { type: 'response.output_text.delta', item_id: 'msg_1', delta: `${'这是一份完整的总结。'.repeat(60)}现在继续：` },

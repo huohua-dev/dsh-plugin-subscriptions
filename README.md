@@ -87,7 +87,9 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-Version `0.9.7` adds support for DSH `0.2.0-rc.2`, with development dependencies pinned to that runtime. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. Other `0.2` prereleases are not implicitly allowed.
+Version `0.9.10` adds support for DSH `0.2.1-rc.1`, with development dependencies pinned to that runtime (cordis `4.0.5`, schemastery `3.18.5`). DSH refuses to start a plugin whose declared peer ranges exclude the running runtime, so `0.9.9` and earlier were blocked by the compatibility gate on any `0.2.1` build; the peer ranges now carry `^0.2.1-rc.1`. Preparing tool-call blocks gained a lazy `args` view in this line, which the media tool views do not read. Other `0.2.1` prereleases are not implicitly allowed.
+
+Version `0.9.7` added support for DSH `0.2.0-rc.2`, with development dependencies pinned to that runtime. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. Other `0.2` prereleases are not implicitly allowed.
 
 The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified.
 
@@ -331,7 +333,7 @@ This plugin only supplies model routes. Approval policy lives elsewhere:
 ## Develop
 
 ```sh
-pnpm install   # development baseline: published DSH 0.2.0-rc.2 packages
+pnpm install   # development baseline: published DSH 0.2.1-rc.1 packages
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```

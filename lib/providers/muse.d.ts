@@ -242,22 +242,29 @@ export declare const MUSE_DANGLING_STOP_MAX_CHARS = 300;
  * reply that neither announces nor claims to be finished is treated as dangling
  * too, because the cost of being wrong is one extra request whose answer is
  * dropped when the model really was done.
- *
- * The hand-back test looks at the last sentence only. A recorded premature stop
- * read "…你看到的不兼容报错来自那一层。我把那段判定逻辑完整抠出来看。" — the
- * mention of "你看到" is a description, not a question — and a whole-reply test
- * threw the stop away, so the user had to type "continue". Only the sentence
- * that would carry the question can hand control back.
  * @param text - the reply's text blocks, joined.
  * @returns true when the turn most likely ended early.
  */
 export declare function museDanglingText(text: string): boolean;
 /**
+ * Whether a reply to the user's own message only announces an action and ends.
+ * Recorded 2026-10-17: the user typed "创建v0.2.2 tag", Muse answered "我来给
+ * 当前已推送的提交创建 `v0.2.2` 标签并推送。" and stopped, so the user had to
+ * type "继续". A reply to the user is normally an answer, so this path is
+ * narrower than {@link museDanglingText}: the reply has to announce an action or
+ * trail off with a colon, never merely be short. Mid-tool-loop replies keep the
+ * broader rule.
+ * @param text - the reply's text blocks, joined.
+ * @returns true when the turn most likely ended early.
+ */
+export declare function museAnnouncesAction(text: string): boolean;
+/**
  * Whether the model is in the middle of a tool loop: the newest real input is
  * a tool result, not something the user typed. DSH slips its own context
  * messages (time, instructions, catalogs) between the two as user-role
  * messages with another `source.kind`; those are skipped. A reply to a fresh
- * user message is an answer, never a dangling stop.
+ * user message is checked by {@link museAnnouncesAction} instead: it counts only
+ * when the reply itself announces an action.
  * @param messages - the request's messages.
  */
 export declare function museMidToolLoop(messages: GenerateOptions['messages']): boolean;
@@ -382,8 +389,10 @@ export declare class MuseAdapter extends LlmAdapter {
     private streamCore;
     /**
      * Whether a finished response may be the early end described at
-     * {@link MUSE_DANGLING_STOP_NOTICE}: a short text-only reply to a tool result,
-     * from a request that offered tools, that does not read as a final answer.
+     * {@link MUSE_DANGLING_STOP_NOTICE}: a short text-only reply from a request
+     * that offered tools. In the middle of a tool loop the reply only has to not
+     * read as a final answer; on the first step of a turn, where the newest input
+     * is the user's message, it has to announce the action it never performs.
      */
     private endedEarly;
     /**

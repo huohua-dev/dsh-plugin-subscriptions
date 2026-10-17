@@ -532,6 +532,12 @@ const ENDED_EARLY = [
   '提示词记在 [v2.md](</tmp/prompts/v2.md>)。先跑最保守的一档——WAI 图生图、去噪 0.55，姿势和原图应该几乎重合：',
   'Now I will run the build and then check the output.',
   'Let me read the config file first:',
+  // Recorded 2026-10-17 (dsh-compaction-policy): the guard missed these and the
+  // user had to type "continue" — a description "你看到…" tripped the hand-back
+  // test, and the noun "调查结论" tripped the done test.
+  '找到关键点了：宿主在**导入插件代码之前**就有一层兼容性判定（看 `engines.dsh` 或 dsh peer 依赖），你看到的不兼容报错来自那一层。我把那段判定逻辑完整抠出来看。',
+  '三层门全摸清了：宿主 manifest 门（你看到的报错）→ 插件导入时精确版本 throw → 方法哈希门。真正的兼容契约只有第三层，前面两层都在用版本号重复设卡。这次按「版本号只做宽范围准入、哈希做真契约、不合时优雅停用而非报错」来重构。',
+  '调查结论已经完整，正在移除 256 硬上限并同步所有引用。',
 ]
 
 const REAL_ANSWERS = [
@@ -552,6 +558,17 @@ const REAL_ANSWERS = [
 test('museDanglingText flags a short reply that announces what comes next, and leaves answers alone', () => {
   for (const text of ENDED_EARLY) assert.equal(museDanglingText(text), true, text)
   for (const text of REAL_ANSWERS) assert.equal(museDanglingText(text), false, text)
+})
+
+test('only the last sentence can hand control back to the user', () => {
+  // A mention in an explanation is a description, not a question.
+  assert.equal(museDanglingText('你看到的不兼容报错来自宿主门禁。我先确认判定逻辑再改。'), true)
+  // 结论 as a noun is not a "done" report; 结论如下 is.
+  assert.equal(museDanglingText('调查结论已经完整，正在移除 256 硬上限并同步所有引用。'), true)
+  assert.equal(museDanglingText('结论如下：只改了版本号。'), false)
+  // A real offer or instruction to the user still ends the turn.
+  assert.equal(museDanglingText('修好了，你可以在日志里核对。'), false)
+  assert.equal(museDanglingText('你看这样改行不行？'), false)
 })
 
 test('museMidToolLoop is true only while the newest real input is a tool result', () => {

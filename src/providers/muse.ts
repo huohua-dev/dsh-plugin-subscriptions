@@ -556,16 +556,17 @@ export const MUSE_DANGLING_STOP_NOTICE = '[automatic notice] Your previous reply
 export const MUSE_DANGLING_STOP_MAX_CHARS = 300
 
 /**
- * Attempts at the early-stop continuation before the turn ends as the model
- * ended it. The same flaky route that makes the first request of a step retry
- * (a transport cut) must not swallow the continuation silently: recorded
- * 2026-10-17, a continuation request died 10.7 s after a step whose first
- * request had already needed two retries, and the user had to type "continue".
+ * Waits between attempts at the early-stop continuation, one entry per extra
+ * attempt; only transient failures (a transport cut, a 5xx) reach them. The same
+ * flaky route that makes the first request of a step retry must not swallow the
+ * continuation silently: recorded 2026-10-17, a continuation request died
+ * 10.7 s after a step whose own request had needed two retries, and the user had
+ * to type "continue". On 2026-10-18 the retries themselves all died — a step that
+ * survived four harness retries ended early, and three continuation attempts
+ * spent 35 s in the same bad window — so the budget follows the host's shape
+ * rather than stopping at three. Overridable for tests.
  */
-const MUSE_CONTINUATION_ATTEMPTS = 3
-
-/** Waits between continuation attempts; only transient failures reach them. */
-const MUSE_CONTINUATION_RETRY_MS: readonly number[] = [400, 1_200]
+const MUSE_CONTINUATION_RETRY_MS: readonly number[] = [500, 1_500, 4_000, 10_000]
 
 /**
  * A last sentence that hands control to the user on purpose: a question or an
@@ -861,6 +862,8 @@ export interface MuseAdapterOptions {
    * one extra request (default true; see {@link MUSE_DANGLING_STOP_NOTICE}).
    */
   continueDanglingStop?: boolean
+  /** Waits before each extra continuation attempt (tests shorten them). */
+  continuationRetryMs?: readonly number[]
   /** Clock for the blocked-network recheck window (tests advance it). */
   now?: () => number
 }
@@ -1268,7 +1271,7 @@ export class MuseAdapter extends LlmAdapter {
    * means the model really was done, so it is dropped unseen and the first
    * reply stands. The continuation is best effort: a failure before it has
    * produced output leaves the turn exactly as the model ended it, but a
-   * transient transport failure is retried (see {@link MUSE_CONTINUATION_ATTEMPTS})
+   * transient transport failure is retried (see {@link MUSE_CONTINUATION_RETRY_MS})
    * because the route is flaky enough that the step's own request may retry too.
    * @returns the second response and whether it was kept, or undefined when
    *   the request itself failed.
@@ -1287,8 +1290,9 @@ export class MuseAdapter extends LlmAdapter {
       { role: 'assistant', content: [{ type: 'text', text: first.text.join('\n\n') }] },
       { role: 'user', content: [{ type: 'text', text: MUSE_DANGLING_STOP_NOTICE }] },
     ])
+    const retries = this.options.continuationRetryMs ?? MUSE_CONTINUATION_RETRY_MS
     let failure: unknown
-    for (let attempt = 0; attempt < MUSE_CONTINUATION_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt <= retries.length; attempt++) {
       const second = newOutcome()
       // Chunks wait here until the response proves it is a tool call; text
       // before that point is dropped with a text-only answer.
@@ -1324,7 +1328,7 @@ export class MuseAdapter extends LlmAdapter {
         if (committed || watchdog.signal.aborted) throw error
         failure = error
       }
-      const wait = MUSE_CONTINUATION_RETRY_MS[attempt]
+      const wait = retries[attempt]
       if (wait === undefined) break
       await sleep(wait, watchdog.signal)
     }

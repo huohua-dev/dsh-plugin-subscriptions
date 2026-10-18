@@ -622,7 +622,7 @@ const MID_LOOP = () => ({
   messages: [USER, assistantTurn(undefined), TOOL_RESULT],
 }) as unknown as GenerateOptions
 
-function continuingAdapter(fetchFn: typeof fetch, extra: { continueDanglingStop?: boolean; warnings?: string[] } = {}): MuseAdapter {
+function continuingAdapter(fetchFn: typeof fetch, extra: { continueDanglingStop?: boolean; warnings?: string[]; continuationRetryMs?: readonly number[] } = {}): MuseAdapter {
   return new MuseAdapter({
     models: [{ id: 'muse-spark-1.3' }],
     streamIdleTimeoutMs: 1000,
@@ -630,6 +630,7 @@ function continuingAdapter(fetchFn: typeof fetch, extra: { continueDanglingStop?
     discovery: false,
     fetchFn,
     ...extra.continueDanglingStop === undefined ? {} : { continueDanglingStop: extra.continueDanglingStop },
+    ...extra.continuationRetryMs === undefined ? {} : { continuationRetryMs: extra.continuationRetryMs },
     ...extra.warnings === undefined ? {} : { onWarn: message => extra.warnings?.push(message) },
   })
 }
@@ -787,4 +788,18 @@ test('a continuation retries a transient failure instead of ending the turn', as
   assert.equal(count, 3, 'a transport cut on the continuation is retried')
   const end = second.at(-1)
   assert.ok(end?.type === 'finish' && end.reason.kind === 'tool-calls')
+})
+
+test('a continuation that keeps failing gives up after its retry budget, and says so', async () => {
+  // Recorded 2026-10-18: a step that survived four harness retries ended early,
+  // and every continuation attempt died in the same bad window. The turn must
+  // still end exactly as the model ended it, with the reason logged.
+  const warnings: string[] = []
+  const { calls, fetchFn } = recordingFetch((_url, _init, index) =>
+    index === 0 ? sse(ANNOUNCEMENT_EVENTS) : json({ error: { message: 'busy' } }, 503))
+  const chunks = await collect(continuingAdapter(fetchFn, { warnings, continuationRetryMs: [0, 0, 0] }).stream(MID_LOOP()))
+  assert.equal(calls.length, 5, 'one request per attempt, three of them retries')
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop')
+  assert.ok(warnings.some(message => /continuation .* failed \(HTTP 503\)/.test(message)), warnings.join('\n'))
 })

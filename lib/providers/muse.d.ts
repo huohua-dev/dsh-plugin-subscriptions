@@ -324,6 +324,8 @@ export interface MuseAdapterOptions {
      * one extra request (default true; see {@link MUSE_DANGLING_STOP_NOTICE}).
      */
     continueDanglingStop?: boolean;
+    /** Waits before each extra continuation attempt (tests shorten them). */
+    continuationRetryMs?: readonly number[];
     /** Clock for the blocked-network recheck window (tests advance it). */
     now?: () => number;
 }
@@ -404,7 +406,7 @@ export declare class MuseAdapter extends LlmAdapter {
      * means the model really was done, so it is dropped unseen and the first
      * reply stands. The continuation is best effort: a failure before it has
      * produced output leaves the turn exactly as the model ended it, but a
-     * transient transport failure is retried (see {@link MUSE_CONTINUATION_ATTEMPTS})
+     * transient transport failure is retried (see {@link MUSE_CONTINUATION_RETRY_MS})
      * because the route is flaky enough that the step's own request may retry too.
      * @returns the second response and whether it was kept, or undefined when
      *   the request itself failed.

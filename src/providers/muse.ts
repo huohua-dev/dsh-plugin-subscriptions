@@ -37,6 +37,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { DeviceFlowSpec } from '../auth/device-flow.js'
 import type { MuseSession, ProviderId } from '../auth/store.js'
 import { proxiedFetch } from '../http.js'
+import { MUSE_ATTESTATION_NOTICE, MUSE_BUILTIN_TOOL_NAMESPACE } from './muse-builtin-tools.js'
 import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
 import type { ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
@@ -85,8 +86,12 @@ export const MUSE_KEY_URL = 'https://api.meta.ai/muse-code/key'
 export const MUSE_API_URL = 'https://api.meta.ai/v1/responses'
 /** The Muse CLI's catalog: per-model limits, modalities, efforts, visibility. */
 export const MUSE_MODELS_URL = 'https://api.meta.ai/muse-code/models'
-/** Muse CLI release this plugin presents itself as (user agent only). */
-export const MUSE_CLI_VERSION = '1.4.7'
+/**
+ * Muse CLI release this plugin presents itself as (user agent only). The
+ * builtin tool declarations in {@link MUSE_BUILTIN_TOOL_NAMESPACE} are the
+ * ones that release sends; move both together.
+ */
+export const MUSE_CLI_VERSION = '1.4.14'
 /**
  * Re-mint cadence. Meta does not disclose a key lifetime; integrations treat
  * the key as daily, and a re-mint of a still-valid key returns it unchanged,
@@ -749,6 +754,41 @@ function captureInto(outcome: MuseStreamOutcome): (event: ResponsesStreamEvent) 
   }
 }
 
+/** Prefix every Muse Code builtin tool name carries inside its `muse` namespace. */
+export const MUSE_BUILTIN_TOOL_PREFIX = 'muse.'
+
+/**
+ * Resolve the name of a tool call the model emitted. Muse's builtin calls
+ * arrive namespaced (`muse.bash`); when this session declares the same tool at
+ * the top level — this route does, for every harness tool — the un-namespaced
+ * name is the one the harness can run. Any other namespaced name passes
+ * through untouched, so a builtin this session does not declare fails as an
+ * ordinary unknown tool instead of silently running something else.
+ * @param name - the tool name as the model emitted it.
+ * @param declared - names of the tools this request declares for the harness.
+ * @returns the name the harness should see.
+ */
+export function museToolCallName(name: string, declared: ReadonlySet<string>): string {
+  if (!name.startsWith(MUSE_BUILTIN_TOOL_PREFIX)) return name
+  const bare = name.slice(MUSE_BUILTIN_TOOL_PREFIX.length)
+  return declared.has(bare) ? bare : name
+}
+
+/** Event tap: rewrite a namespaced builtin call, then run the caller's capture. */
+function museEventTap(
+  capture: (event: ResponsesStreamEvent) => ResponsesStreamEvent,
+  declared: ReadonlySet<string>,
+): (event: ResponsesStreamEvent) => ResponsesStreamEvent {
+  return event => {
+    const item = event.item
+    if (item?.type === 'function_call' && typeof item.name === 'string') {
+      const name = museToolCallName(item.name, declared)
+      if (name !== item.name) event = { ...event, item: { ...item, name } }
+    }
+    return capture(event)
+  }
+}
+
 /** The chunk moved to a later block index (a second response continuing one message). */
 function shiftedChunk(chunk: StreamChunk, offset: number): StreamChunk {
   return offset === 0 || !('index' in chunk) ? chunk : { ...chunk, index: chunk.index + offset }
@@ -796,13 +836,23 @@ export function museRequestBody(
   options: GenerateOptions,
   resolved: ResponsesRequestInput,
 ): Record<string, unknown> {
+  const carriesTools = options.tools !== undefined && options.tools.length > 0
+  // Meta's gateway refuses a subscription-billed key (`403
+  // client_attestation_denied`) when a request declares more than a handful of
+  // tools without Muse Code's builtin declarations alongside them, so a
+  // tool-carrying request declares the CLI's `muse` namespace verbatim, ahead
+  // of this client's own tools. Requests without tools are left untouched.
+  const tools = carriesTools
+    ? [MUSE_BUILTIN_TOOL_NAMESPACE, ...toResponsesTools(options.tools ?? [], { strict: false })]
+    : undefined
+  const instructions = resolved.instructions === undefined
+    ? carriesTools ? MUSE_ATTESTATION_NOTICE : undefined
+    : carriesTools ? `${resolved.instructions}\n\n${MUSE_ATTESTATION_NOTICE}` : resolved.instructions
   return {
     model: options.model,
-    ...resolved.instructions === undefined ? {} : { instructions: resolved.instructions },
+    ...instructions === undefined ? {} : { instructions },
     input: resolved.input,
-    ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto', parallel_tool_calls: true }
-      : {},
+    ...tools === undefined ? {} : { tools, tool_choice: 'auto', parallel_tool_calls: true },
     ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
     ...options.reasoningEffort !== undefined
       ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
@@ -1214,7 +1264,8 @@ export class MuseAdapter extends LlmAdapter {
       // ends early (see MUSE_DANGLING_STOP_NOTICE) is continued by a second
       // request whose chunks carry on the same assistant message.
       const first = newOutcome()
-      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, captureInto(first))) {
+      const declared = new Set((options.tools ?? []).map(tool => tool.name))
+      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, museEventTap(captureInto(first), declared))) {
         recordChunk(first, chunk)
         if (chunk.type !== 'usage' && chunk.type !== 'finish') yield chunk
       }
@@ -1308,7 +1359,8 @@ export class MuseAdapter extends LlmAdapter {
           }
           failure = new Error(`HTTP ${String(response.status)}`)
         } else {
-          for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, captureInto(second))) {
+          const declared = new Set((input.options.tools ?? []).map(tool => tool.name))
+          for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, museEventTap(captureInto(second), declared))) {
             recordChunk(second, chunk)
             if (chunk.type === 'usage' || chunk.type === 'finish') continue
             const placed = shiftedChunk(chunk, first.blocks)

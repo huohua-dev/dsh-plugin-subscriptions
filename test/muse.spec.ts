@@ -30,8 +30,14 @@ import {
   museRequestBody,
   museUsageFromKey,
   museUserAgent,
+  museToolCallName,
   refreshMuse,
 } from '../src/providers/muse.js'
+import {
+  MUSE_ATTESTATION_NOTICE,
+  MUSE_BUILTIN_TOOL_NAMESPACE,
+  MUSE_BUILTIN_TOOL_NAMES,
+} from '../src/providers/muse-builtin-tools.js'
 import type { MuseReplayResponse } from '../src/providers/muse.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { DeviceFlowManager } from '../src/auth/device-flow.js'
@@ -196,8 +202,8 @@ test('fetchMuseModels reads the muse-code catalog and treats an empty list as a 
 })
 
 test('museUserAgent presents a headless Muse CLI build', () => {
-  assert.equal(museUserAgent('darwin', 'arm64'), 'muse-build/1.4.7 (non-interactive; macos-aarch64)')
-  assert.equal(museUserAgent('linux', 'x64'), 'muse-build/1.4.7 (non-interactive; linux-x86_64)')
+  assert.equal(museUserAgent('darwin', 'arm64'), 'muse-build/1.4.14 (non-interactive; macos-aarch64)')
+  assert.equal(museUserAgent('linux', 'x64'), 'muse-build/1.4.14 (non-interactive; linux-x86_64)')
   // DSH attribution must not replace the CLI user agent on inference calls.
   assert.equal(museHeaders('key', 's1')['user-agent'], museUserAgent())
   assert.equal(museHeaders('key', 's1')['x-meta-ai-gateway-session-id'], museHeaders('key', 's1')['x-tbh-session-id'])
@@ -218,7 +224,7 @@ test('museRequestBody mirrors the Muse CLI request shape', () => {
     reasoningEffort: 'low', sessionId: 's-1', tools: TOOLS,
   } as unknown as GenerateOptions
   const body = museRequestBody(options, toResponsesInput([USER], 'sys'))
-  assert.equal(body.instructions, 'sys')
+  assert.equal(body.instructions, `sys\n\n${MUSE_ATTESTATION_NOTICE}`)
   assert.deepEqual(body.reasoning, { effort: 'low', summary: 'auto' })
   assert.deepEqual(body.include, ['reasoning.encrypted_content'])
   assert.equal(body.tool_choice, 'auto')
@@ -228,6 +234,48 @@ test('museRequestBody mirrors the Muse CLI request shape', () => {
   assert.equal(body.max_output_tokens, 4096)
   const bare = museRequestBody({ provider: 'muse', model: 'm', messages: [USER] } as unknown as GenerateOptions, toResponsesInput([USER]))
   assert.ok(!('tools' in bare) && !('tool_choice' in bare) && !('reasoning' in bare) && !('prompt_cache_key' in bare))
+  assert.ok(!('instructions' in bare), 'no tools, no attestation note')
+})
+
+test('museRequestBody declares Muse Code\'s builtin tool namespace ahead of the session tools', () => {
+  const options = {
+    provider: 'muse', model: 'muse-spark-1.3', messages: [USER], tools: TOOLS, sessionId: 's-1',
+  } as unknown as GenerateOptions
+  const tools = museRequestBody(options, toResponsesInput([USER])).tools as Record<string, unknown>[]
+  assert.equal(tools.length, 2)
+  assert.deepEqual(tools[0], MUSE_BUILTIN_TOOL_NAMESPACE)
+  assert.equal(tools[0]?.type, 'namespace')
+  assert.equal(tools[0]?.name, 'muse')
+  assert.deepEqual(tools[1], {
+    type: 'function', name: 'get_weather', description: 'weather',
+    parameters: { type: 'object', properties: {} }, strict: false,
+  })
+  // Without a system prompt the note is the whole instructions field.
+  assert.equal(museRequestBody(options, toResponsesInput([USER])).instructions, MUSE_ATTESTATION_NOTICE)
+})
+
+test('the builtin namespace carries every Muse Code 1.4.14 tool exactly once', () => {
+  assert.deepEqual(MUSE_BUILTIN_TOOL_NAMES, [
+    'workflow', 'read_file', 'search', 'write_file', 'edit_file', 'read_memory', 'add_memory', 'edit_memory',
+    'work_stop', 'work_list', 'web_fetch', 'web_search', 'bash', 'bash_input', 'monitor', 'cron_create',
+    'cron_delete', 'cron_list', 'get_goal', 'create_goal', 'update_goal', 'report_progress', 'read_skill',
+    'work_status', 'snooze_reminder', 'write_todos',
+  ])
+  const subtools = MUSE_BUILTIN_TOOL_NAMESPACE.tools as { name: string; type: string; parameters?: unknown }[]
+  assert.equal(subtools.length, MUSE_BUILTIN_TOOL_NAMES.length)
+  assert.equal(new Set(MUSE_BUILTIN_TOOL_NAMES).size, MUSE_BUILTIN_TOOL_NAMES.length)
+  for (const tool of subtools) {
+    assert.equal(tool.type, 'function')
+    assert.equal(typeof tool.parameters, 'object', tool.name)
+  }
+})
+
+test('museToolCallName un-namespaces only builtins this session declares', () => {
+  const declared = new Set(['bash', 'read'])
+  assert.equal(museToolCallName('muse.bash', declared), 'bash')
+  assert.equal(museToolCallName('bash', declared), 'bash', 'top-level calls pass through')
+  assert.equal(museToolCallName('muse.read_file', declared), 'muse.read_file', 'undeclared builtins stay unknown')
+  assert.equal(museToolCallName('muse.', declared), 'muse.')
 })
 
 const sse = (events: unknown[]): Response => new Response(
@@ -802,4 +850,28 @@ test('a continuation that keeps failing gives up after its retry budget, and say
   const finish = chunks.at(-1)
   assert.ok(finish?.type === 'finish' && finish.reason.kind === 'stop')
   assert.ok(warnings.some(message => /continuation .* failed \(HTTP 503\)/.test(message)), warnings.join('\n'))
+})
+
+test('a namespaced builtin call runs as the declared top-level tool', async () => {
+  const namespaced = TOOL_CALL_EVENTS.map(event => {
+    const item = 'item' in event ? (event as { item?: { type?: string } }).item : undefined
+    return item?.type === 'function_call'
+      ? { ...event, item: { ...item, name: 'muse.get_weather' } }
+      : event
+  })
+  const { fetchFn } = recordingFetch(() => sse(namespaced))
+  const chunks = await collect(new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens({ accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }),
+    discovery: false,
+    fetchFn,
+  }).stream({ provider: 'muse', model: 'muse-spark-1.3', tools: TOOLS, messages: [USER] } as unknown as GenerateOptions))
+
+  const blockEnd = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
+  assert.ok(blockEnd?.type === 'block-end' && blockEnd.block.type === 'tool-call')
+  assert.equal(blockEnd.block.name, 'get_weather', 'the harness only knows the un-namespaced name')
+  const deltas = chunks.filter(chunk => chunk.type === 'tool-call-delta')
+  assert.ok(deltas.length > 0)
+  assert.deepEqual([...new Set(deltas.map(chunk => chunk.name))], ['get_weather'], 'every delta carries the mapped name')
 })

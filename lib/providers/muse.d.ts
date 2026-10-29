@@ -41,8 +41,12 @@ export declare const MUSE_KEY_URL = "https://api.meta.ai/muse-code/key";
 export declare const MUSE_API_URL = "https://api.meta.ai/v1/responses";
 /** The Muse CLI's catalog: per-model limits, modalities, efforts, visibility. */
 export declare const MUSE_MODELS_URL = "https://api.meta.ai/muse-code/models";
-/** Muse CLI release this plugin presents itself as (user agent only). */
-export declare const MUSE_CLI_VERSION = "1.4.7";
+/**
+ * Muse CLI release this plugin presents itself as (user agent only). The
+ * builtin tool declarations in {@link MUSE_BUILTIN_TOOL_NAMESPACE} are the
+ * ones that release sends; move both together.
+ */
+export declare const MUSE_CLI_VERSION = "1.4.14";
 /**
  * Re-mint cadence. Meta does not disclose a key lifetime; integrations treat
  * the key as daily, and a re-mint of a still-valid key returns it unchanged,
@@ -274,6 +278,20 @@ export declare function museMidToolLoop(messages: GenerateOptions['messages']): 
  * other response only adds the tokens it generated.
  */
 export declare function museMergedUsage(kept: TokenUsage | undefined, other: TokenUsage | undefined): TokenUsage | undefined;
+/** Prefix every Muse Code builtin tool name carries inside its `muse` namespace. */
+export declare const MUSE_BUILTIN_TOOL_PREFIX = "muse.";
+/**
+ * Resolve the name of a tool call the model emitted. Muse's builtin calls
+ * arrive namespaced (`muse.bash`); when this session declares the same tool at
+ * the top level — this route does, for every harness tool — the un-namespaced
+ * name is the one the harness can run. Any other namespaced name passes
+ * through untouched, so a builtin this session does not declare fails as an
+ * ordinary unknown tool instead of silently running something else.
+ * @param name - the tool name as the model emitted it.
+ * @param declared - names of the tools this request declares for the harness.
+ * @returns the name the harness should see.
+ */
+export declare function museToolCallName(name: string, declared: ReadonlySet<string>): string;
 /**
  * Index the replayable reasoning of earlier assistant turns by call id. Only
  * turns this route produced for the same model and account qualify: encrypted

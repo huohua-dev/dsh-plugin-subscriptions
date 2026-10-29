@@ -34,6 +34,8 @@
 
 目录声明了 fast tier(即 codex CLI 的 fast 模式)的 Codex 模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速(`service_tier: priority`),按会话生效。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
 
+子代理的默认速度单独按模型设置：**设置 → 订阅 → ChatGPT（Codex）→ 管理 → 编辑模型列表 → 子代理默认速度**。点击「保存更改」后，对子代理的后续请求生效，正在运行的子代理也会采用新设置。该设置重启后保留，与父会话使用什么模型无关；主会话的速度不会传递给子代理。如果在某个子会话中明确选择了速度（包括标准档），则优先使用该会话的选择；会话内的明确选择重启后重置。快速档仍要求实际使用的 Codex 模型目录声明支持。宿主无法提供运行中 Agent 的来源元数据时，未明确设置速度的会话保持标准档。
+
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 输入框下方的统计行会多出一个**订阅用量**胶囊，显示当前会话所选模型对应服务商的已用百分比和重置窗口（选 Codex 模型时显示 Codex，选 Grok 模型时显示 Grok，以此类推）。状态栏最多显示一家：切到非订阅模型时，保留当前会话视图中最近选择的订阅；没有记录则隐藏。最近模型记录不会跨页面刷新保存。点击可展开查看所有已登录服务商及其全部账号 —— 默认账号带星标，当前服务商排在最前。Antigravity 仅预览当前模型的额度窗口（每个账号最多两个），其余模型窗口默认折叠，仍可点击展开。
@@ -86,9 +88,11 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-`0.9.10` 版本新增对 DSH `0.2.1-rc.1` 的支持，开发依赖固定到该运行时（cordis `4.0.5`、schemastery `3.18.5`）。DSH 会拒绝启动 peer 依赖范围不包含当前运行时的插件，因此在任何 `0.2.1` 版本上 `0.9.9` 及更早版本都会被兼容性检查拦下；现在 peer 范围已包含 `^0.2.1-rc.1`。该版本的工具准备状态块新增了惰性 `args` 视图，媒体工具视图并不读取它。不会自动放行其他 `0.2.1` 预发布版本。
+`0.9.10` 版本新增对 DSH `0.2.1-rc.1` 的支持，开发依赖固定到该运行时（cordis `4.0.5`、schemastery `3.18.5`）。DSH 会拒绝启动 peer 依赖范围不包含当前运行时的插件，因此在任何 `0.2.1` 版本上 `0.9.9` 及更早版本都会被兼容性检查拦下；现在 peer 范围已包含 `^0.2.1-rc.1`。该版本的工具准备状态块新增了惰性 `args` 视图，媒体工具视图并不读取它。脱字符范围已覆盖后续 `0.2.1-rc` 版本；它不包含的 `0.2.1-alpha.2` / `0.2.1-alpha.3` 已单独列出。
 
-`0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持，开发依赖已固定到该版本。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。不会自动放行其他 `0.2` 预发布版本。
+`0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持；DSH `0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-rc.2` 和 `0.2.1-rc.3` 同样受支持，开发依赖固定到 `0.2.1-rc.2`。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。`0.2.1-rc.2` 还要求每个工具调用头都带上参数，且 Web 运行时的 provider 覆盖改为 `Volatile` 引用。不会自动放行其他 `0.2` 预发布版本。
+
+DSH `0.2.1-rc.2` 加载时优先使用已声明的 `engines.dsh`；未声明时，要求所有 `@deepseek-ai/dsh` 和 `@deepseek-ai/dsh-*` peer 范围均匹配当前 DSH 版本，预发布版本也参与匹配。本插件未声明 `engines.dsh`，因此由 DSH peer 范围决定是否允许加载。`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 的 peer 影响包管理器的依赖解析，不参与这项加载检查；它们保留 `^4.0.1` / `^3.18.1` 下限，并额外列出 DSH `0.2.1-alpha.2`、`0.2.1-alpha.3` 自带的 `4.0.5-alpha` / `3.18.5-alpha` 版本，因为这些脱字符范围按 npm 默认的 semver 规则不包含上述预发布版本。
 
 当前版本支持已发布的 DSH `0.1.1-rc.2`、`0.1.2-alpha`/`rc`、`0.1.3-alpha`、`0.1.5-alpha`/`rc` 和 `0.1.7-rc` 版本线，包括 `0.1.5-rc.2` 和 `0.1.7-rc.2`。peer 范围使用 `0.1.5-alpha.1` 作为锚点，按照 npm semver 规则也覆盖之后的 `0.1.5-alpha`、`0.1.5-rc` 和稳定版 `0.1.5`；`0.1.7-rc.1` 锚点同样覆盖之后的 `0.1.7-rc` 和稳定版 `0.1.7`。DSH `0.1.6-alpha` 和 `0.1.7-alpha` 尚未单独验证，因此暂不纳入支持范围。
 
@@ -219,7 +223,7 @@ Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
 responses-only 系列（gpt-5.5/5.6 等）会拒绝该端点。固定为 `chat-completions` 也会退出上文所述
 tools+effort 的自动改道。
 
-Antigravity 已内置 [pi-antigravity 使用的公开桌面 OAuth 客户端配置](https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/SECURITY.md#oauth-client-credentials)，无需额外配置客户端即可点击「登录」进入 Google 授权。使用自定义客户端时，可配置 `antigravity.clientId` 及其可选的 `antigravity.clientSecret`，或设置 `ANTIGRAVITY_CLIENT_ID` 及其可选的 `ANTIGRAVITY_CLIENT_SECRET`。优先级为插件配置、环境变量、内置默认值；ID 和 secret 按同一来源成对读取，自定义 ID 不会继承默认 secret，单独提供 secret 会报错。可选的 `antigravity.baseURL`、`antigravity.userAgent` 和 `antigravity.onboard` 分别控制 API 地址、客户端标识和账号初始化。默认客户端标识与桌面 IDE 一致（`antigravity/ide/<版本> <系统>/<架构>`）；上游按它决定下发哪些模型（旧标识拿不到分档位的 Gemini 3.8 Flash），除非需要固定为别的值，否则 `userAgent` 留空即可。账号无权使用的条目（标记为 `disabled` 或 `*-disabled` 占位模型，例如非 AI Ultra 账号的 Gemini 4 Argon）不会出现在模型选择器中。此路由使用 Antigravity OAuth 与 v1internal 项目封装，独立于 Gemini CLI。
+Antigravity 已内置 [pi-antigravity 使用的公开桌面 OAuth 客户端配置](https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/SECURITY.md#oauth-client-credentials)，无需额外配置客户端即可点击「登录」进入 Google 授权。使用自定义客户端时，可配置 `antigravity.clientId` 及其可选的 `antigravity.clientSecret`，或设置 `ANTIGRAVITY_CLIENT_ID` 及其可选的 `ANTIGRAVITY_CLIENT_SECRET`。优先级为插件配置、环境变量、内置默认值；ID 和 secret 按同一来源成对读取，自定义 ID 不会继承默认 secret，单独提供 secret 会报错。可选的 `antigravity.baseURL`、`antigravity.userAgent` 和 `antigravity.onboard` 分别控制 API 地址、客户端标识和账号初始化。默认客户端标识与桌面客户端一致（`antigravity/hub/<版本> <系统>/<架构>`，版本 `2.23.0`）；上游按它决定下发哪些模型（旧标识拿不到分档位的 Gemini 3.8 Flash，Gemini 4 Argon 也只对 `hub` 2.23.0 及以上下发），除非需要固定为别的值，否则 `userAgent` 留空即可。账号无权使用的条目（标记为 `disabled` 或 `*-disabled` 占位模型，例如尚未开通 Argon 的账号收到的 `gemini-4-argon-disabled`）不会出现在模型选择器中。此路由使用 Antigravity OAuth 与 v1internal 项目封装，独立于 Gemini CLI。
 
 Muse Code 复用 Muse CLI 自己的登录方式：在 `auth.meta.com` 走设备码流程（CLI 的公开 client id）拿到 Meta 身份 token，再到 `api.meta.ai/muse-code/key` 换取请求用的 Model API key。身份 token 会保留下来，每天重新签发一次 key（签发是幂等的，不会轮换 CLI 正在用的 key）。同一个签发响应还会返回账号邮箱、订阅档位以及 5 小时/每周用量窗口。请求格式与 CLI 一致（`reasoning.summary: auto`、加密推理、`store: false`、prompt-cache key，以及 CLI 的 user agent 和 `x-client-id`/会话请求头）；推理等级为 `minimal` 到 `max`（默认 `high`）。带工具调用的回合会把已完成的推理项存进该回合的回放状态，下一轮在对应 function call 之前回传，且只回传给相同模型和账号；如果 Meta 以 HTTP 400 拒绝，会去掉推理项重试一次。模型列表来自 CLI 使用的 `api.meta.ai/muse-code/models`（含上下文/输出上限、输入模态、推理档、是否隐藏）。Meta 会在部分网络（包括一些商用代理出口）屏蔽 Muse：在这类网络上目录返回为空（此时使用内置的 Muse Wonder 1.0 / Spark 1.3 / Spark 1.2 目录，并只警告一次），部分模型的请求会时不时被以 404 `model_not_found` 拒绝。每一次这样的拒绝，还会让 Meta 在几分钟内对整个账号、在所有网络上间歇性地拒绝该模型——其他设备、干净 VPS 上的官方 Muse CLI 也不例外（已用同一个 key 实测验证；读取目录或成功的请求不会触发）。因此在目录为空的网络上遇到 `model_not_found` 会立即以 `MUSE_NETWORK_BLOCKED` 失败：不重试，也不冷却账号池成员；之后五分钟内的请求会先重新检查目录再决定是否发送，避免再次被拒。在能列出目录的网络上，404 说明账号还在恢复：插件会就地重试（约 7 秒），仍失败则报为可重试的服务端错误，让 harness 继续重试。请让 `api.meta.ai` 走 Meta 不屏蔽的网络（VPS 或住宅出口，或插件代理设置）；切换后的几分钟内仍可能间歇性出现 404。TLS 和 HTTP/2 指纹不是原因：CLI 本身使用 rustls 上的 HTTP/1.1，在被屏蔽的网络上同样会被拒绝。
 
@@ -334,7 +338,7 @@ http://proxy.example:8080
 ## 开发
 
 ```sh
-pnpm install   # 开发基线：已发布的 DSH 0.2.1-rc.1 依赖
+pnpm install   # 开发基线：已发布的 DSH 0.2.1-rc.2 依赖
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```

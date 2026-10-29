@@ -49,6 +49,8 @@ export declare const en: {
     modelsContextBounds: string;
     modelsContextHint: string;
     modelsContextInvalid: string;
+    modelsSubagentSpeed: string;
+    modelsSubagentSpeedHint: string;
     modelsTools: string;
     modelsToolsHint: string;
     modelsImage: string;
@@ -95,6 +97,7 @@ export declare const en: {
     usageRefresh: string;
     usageLoading: string;
     usageEmpty: string;
+    usageNoVisibleModels: string;
     usageError: string;
     usageSession: string;
     usageWeekly: string;
@@ -133,6 +136,9 @@ export declare const en: {
     modelDefaultsSummaryEmpty: string;
     modelDefaultsFilterPlaceholder: string;
     modelDefaultsFilterEmpty: string;
+    modelDefaultsNoModels: string;
+    modelDefaultsNoAccount: string;
+    modelDefaultsDiscoveryFailed: string;
     generating: string;
     image: string;
     viewImage: string;
@@ -244,6 +250,8 @@ export declare const zh: {
     modelsContextBounds: string;
     modelsContextHint: string;
     modelsContextInvalid: string;
+    modelsSubagentSpeed: string;
+    modelsSubagentSpeedHint: string;
     modelsTools: string;
     modelsToolsHint: string;
     modelsImage: string;
@@ -290,6 +298,7 @@ export declare const zh: {
     usageRefresh: string;
     usageLoading: string;
     usageEmpty: string;
+    usageNoVisibleModels: string;
     usageError: string;
     usageSession: string;
     usageWeekly: string;
@@ -328,6 +337,9 @@ export declare const zh: {
     modelDefaultsSummaryEmpty: string;
     modelDefaultsFilterPlaceholder: string;
     modelDefaultsFilterEmpty: string;
+    modelDefaultsNoModels: string;
+    modelDefaultsNoAccount: string;
+    modelDefaultsDiscoveryFailed: string;
     generating: string;
     image: string;
     viewImage: string;

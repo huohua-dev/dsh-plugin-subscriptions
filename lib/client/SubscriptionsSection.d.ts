@@ -13,6 +13,8 @@ export interface AccountStatus {
 }
 /** One provider's login state as answered by the `status` endpoint. */
 export interface ProviderStatus {
+    /** Picker selection; absent follows discovery, [] hides all model quotas. */
+    visibleModels?: string[];
     displayName?: string;
     busy: boolean;
     accounts: AccountStatus[];

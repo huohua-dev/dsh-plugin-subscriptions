@@ -11,6 +11,7 @@ export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' 
 /** Mirrors `PromptCacheTtl` in translate/anthropic.ts; kept here so the client bundle needs no translate import. */
 export declare const PROMPT_CACHE_TTLS: readonly ["5m", "1h"];
 export type PromptCacheTtlSetting = typeof PROMPT_CACHE_TTLS[number];
+export type SubagentSpeedTier = 'standard' | 'fast';
 export interface AccountPreferences {
     alias?: string;
     /** Absent means included. */
@@ -35,6 +36,8 @@ export interface ProviderPreferences {
     /** Absent follows discovery; an explicit selection hides newly discovered models. */
     visibleModels?: string[];
     contextWindows?: Record<string, number>;
+    /** Codex only: per-model defaults for subagents, independent of main-session speed. */
+    subagentSpeeds?: Record<string, SubagentSpeedTier>;
     tools?: Partial<Record<SubscriptionTool, boolean>>;
     /** Claude only: overrides the plugin config's `claudePromptCacheTtl`; absent follows config. */
     promptCacheTtl?: PromptCacheTtlSetting;
@@ -50,6 +53,8 @@ export declare class ProviderSettingsStore {
     visible(provider: ProviderId, model: string): boolean;
     modelName(provider: ProviderId, model: string, fallback: string): string;
     contextWindow(model: string): number | undefined;
+    /** Read on every request so saved changes apply to the next subagent request. */
+    subagentSpeed(model: string): SubagentSpeedTier;
     /** The Settings-page Claude cache TTL; undefined follows the plugin config. Read per request, so no clone. */
     promptCacheTtl(): PromptCacheTtlSetting | undefined;
     /**

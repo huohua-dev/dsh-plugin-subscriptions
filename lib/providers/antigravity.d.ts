@@ -19,13 +19,15 @@ export declare const ANTIGRAVITY_USERINFO_URL = "https://www.googleapis.com/oaut
 export declare const ANTIGRAVITY_DEFAULT_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";
 export declare const ANTIGRAVITY_PROD_BASE_URL = "https://cloudcode-pa.googleapis.com";
 /**
- * IDE version the backend sees. The catalog and model routing are gated on the
- * desktop identity: with a 1.x agent the backend withholds the per-effort
+ * Client version the backend sees. The catalog and model routing are gated on
+ * the desktop identity: with a 1.x agent the backend withholds the per-effort
  * Gemini 3.8 Flash ids (`gemini-3.8-flash-high/medium/low`, 404 on generate)
- * and offers only `gemini-3.8-flash-tiered`.
+ * and offers only `gemini-3.8-flash-tiered`; Gemini 4 Argon
+ * (`gemini-4-argon-low/medium/high`) is listed only for the `hub` client
+ * family at 2.23.0 or later (`ide/2.23.0` and `hub/2.11.0` both omit it).
  */
-export declare const ANTIGRAVITY_IDE_VERSION = "2.11.0";
-/** The Antigravity desktop user agent for one platform: `antigravity/ide/<version> <os>/<arch>`. */
+export declare const ANTIGRAVITY_IDE_VERSION = "2.23.0";
+/** The Antigravity desktop user agent for one platform: `antigravity/hub/<version> <os>/<arch>`. */
 export declare function antigravityUserAgent(platform?: string, arch?: string): string;
 export declare const ANTIGRAVITY_DEFAULT_USER_AGENT: string;
 export declare const ANTIGRAVITY_PREEMPT_MS: number;

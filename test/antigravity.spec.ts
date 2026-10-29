@@ -176,12 +176,15 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
 
 test('Antigravity presents the 2.x desktop identity, falling back from a blank configured agent', async () => {
   // A 1.x agent hides the per-effort Gemini 3.8 Flash ids from the catalog
-  // and 404s them on generate, so the default must be the IDE 2.x form.
-  assert.equal(antigravityUserAgent('darwin', 'arm64'), `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} darwin/arm64`)
-  assert.equal(antigravityUserAgent('linux', 'x64'), `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} linux/amd64`)
-  assert.equal(antigravityUserAgent('win32', 'x64'), `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} windows/amd64`)
+  // and 404s them on generate, and Gemini 4 Argon is listed only for the
+  // `hub` family at 2.23.0+, so the default must be the hub 2.23+ form.
+  assert.equal(antigravityUserAgent('darwin', 'arm64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} darwin/arm64`)
+  assert.equal(antigravityUserAgent('linux', 'x64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} linux/amd64`)
+  assert.equal(antigravityUserAgent('win32', 'x64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} windows/amd64`)
   assert.equal(ANTIGRAVITY_DEFAULT_USER_AGENT, antigravityUserAgent(process.platform, process.arch))
-  assert.match(ANTIGRAVITY_DEFAULT_USER_AGENT, /^antigravity\/ide\/2\.\d+\.\d+ \S+\/\S+$/)
+  assert.match(ANTIGRAVITY_DEFAULT_USER_AGENT, /^antigravity\/hub\/2\.\d+\.\d+ \S+\/\S+$/)
+  const [major, minor] = ANTIGRAVITY_IDE_VERSION.split('.').map(Number)
+  assert.ok(major > 2 || (major === 2 && minor >= 23), 'Gemini 4 Argon needs a 2.23.0+ client version')
 
   const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
   const agentOf = async (userAgent: string | undefined): Promise<string | null> => {
@@ -197,7 +200,7 @@ test('Antigravity presents the 2.x desktop identity, falling back from a blank c
 })
 
 test('Antigravity drops disabled and *-disabled placeholder entries from models and usage', async () => {
-  // Plan-gated launches (Gemini 4 Argon below AI Ultra) ride along as
+  // Plan-gated launches (Gemini 4 Argon on an account it has not reached yet) ride along as
   // placeholders that fail every request; they must not reach the picker.
   const fetchFn = routed({
     [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: {
@@ -722,6 +725,14 @@ test('Antigravity reasoning uses supported runtime budgets and rejects unsupport
   const info = await adapter.resolveModel('antigravity', 'gemini-3-flash')
   assert.deepEqual(info.reasoning?.efforts.map(entry => entry.id), ['low', 'medium', 'high'])
   assert.equal(info.reasoning?.defaultEffort, 'high')
+  // Gemini 4 Argon ships per-effort ids like Gemini 3.8 Flash: each id pins its effort.
+  for (const effort of ['low', 'medium', 'high'] as const) {
+    const argon = await adapter.resolveModel('antigravity', `gemini-4-argon-${effort}`)
+    assert.deepEqual(argon.reasoning?.efforts.map(entry => entry.id), [effort])
+  }
+  const argonHigh = toAntigravityRequest({ ...options([]), model: 'gemini-4-argon-high', reasoningEffort: ReasoningEffortId('high'), maxTokens: 20000 }, [], session.projectId)
+  assert.deepEqual(argonHigh.request.generationConfig?.thinkingConfig, { includeThoughts: true, thinkingBudget: -1 })
+  assert.throws(() => toAntigravityRequest({ ...options([]), model: 'gemini-4-argon-high', reasoningEffort: ReasoningEffortId('low') }, [], session.projectId), /does not support/)
 })
 
 test('Claude streaming caps maxOutputTokens at 64000 to avoid INVALID_ARGUMENT on high limits', () => {

@@ -57,12 +57,14 @@ export const ANTIGRAVITY_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/us
 export const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
 export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
 /**
- * IDE version the backend sees. The catalog and model routing are gated on the
- * desktop identity: with a 1.x agent the backend withholds the per-effort
+ * Client version the backend sees. The catalog and model routing are gated on
+ * the desktop identity: with a 1.x agent the backend withholds the per-effort
  * Gemini 3.8 Flash ids (`gemini-3.8-flash-high/medium/low`, 404 on generate)
- * and offers only `gemini-3.8-flash-tiered`.
+ * and offers only `gemini-3.8-flash-tiered`; Gemini 4 Argon
+ * (`gemini-4-argon-low/medium/high`) is listed only for the `hub` client
+ * family at 2.23.0 or later (`ide/2.23.0` and `hub/2.11.0` both omit it).
  */
-export const ANTIGRAVITY_IDE_VERSION = '2.11.0'
+export const ANTIGRAVITY_IDE_VERSION = '2.23.0'
 
 /** Go-style OS/arch pair the desktop client appends (`darwin/arm64`, `windows/amd64`). */
 function antigravityPlatform(platform: string, arch: string): string {
@@ -71,9 +73,9 @@ function antigravityPlatform(platform: string, arch: string): string {
   return `${os}/${cpu}`
 }
 
-/** The Antigravity desktop user agent for one platform: `antigravity/ide/<version> <os>/<arch>`. */
+/** The Antigravity desktop user agent for one platform: `antigravity/hub/<version> <os>/<arch>`. */
 export function antigravityUserAgent(platform: string = process.platform, arch: string = process.arch): string {
-  return `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} ${antigravityPlatform(platform, arch)}`
+  return `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} ${antigravityPlatform(platform, arch)}`
 }
 
 export const ANTIGRAVITY_DEFAULT_USER_AGENT = antigravityUserAgent()
@@ -422,7 +424,8 @@ function isDisabledModel(id: string, model: AntigravityWireModel): boolean {
  * `isInternal` or named in `tabModelIds`, `tab_*` ids) and the image
  * generator; offering them in the picker only produces failing sessions.
  * Plan-gated launches also appear as `disabled: true` entries or `*-disabled`
- * placeholders (Gemini 4 Argon below AI Ultra); both fail every request.
+ * placeholders (`gemini-4-argon-disabled` on an account Argon has not reached
+ * yet); both fail every request.
  */
 function isAgentModel(id: string, model: AntigravityWireModel, payload: AntigravityModelsResponse): boolean {
   if (isDisabledModel(id, model)) return false

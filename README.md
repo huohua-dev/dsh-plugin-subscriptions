@@ -34,6 +34,8 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
 
+Subagents have a separate per-model default: **Settings → Subscriptions → ChatGPT (Codex) → Manage → Edit model list → Subagent default speed**. Save changes to apply it to subsequent requests, including running subagents. This setting persists across restarts and works regardless of the parent model; main-session Speed choices do not propagate to children. A speed explicitly selected in a child session overrides its model default, including Standard. Explicit session choices reset on restart. Fast still requires catalog support for the actual Codex model. Hosts without live agent origin metadata keep Standard unless the session has an explicit speed choice.
+
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 The composer's stats row gains a **subscription usage** pill showing the used percentage and reset window for the provider of the session's current model (Codex for a Codex model, Grok for a Grok model, and so on). It shows at most one provider: when switching to a non-subscription model, it keeps the most recent subscription selected in the mounted conversation view, or stays hidden if there is none. This recent-model history is not persisted across page reloads. Click the pill to expand every logged-in provider and account — the default account is starred, and the current provider is listed first. Antigravity previews only the current model's windows (at most two per account); the other model windows remain available in a closed disclosure.
@@ -87,9 +89,11 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-Version `0.9.10` adds support for DSH `0.2.1-rc.1`, with development dependencies pinned to that runtime (cordis `4.0.5`, schemastery `3.18.5`). DSH refuses to start a plugin whose declared peer ranges exclude the running runtime, so `0.9.9` and earlier were blocked by the compatibility gate on any `0.2.1` build; the peer ranges now carry `^0.2.1-rc.1`. Preparing tool-call blocks gained a lazy `args` view in this line, which the media tool views do not read. Other `0.2.1` prereleases are not implicitly allowed.
+Version `0.9.10` adds support for DSH `0.2.1-rc.1`, with development dependencies pinned to that runtime (cordis `4.0.5`, schemastery `3.18.5`). DSH refuses to start a plugin whose declared peer ranges exclude the running runtime, so `0.9.9` and earlier were blocked by the compatibility gate on any `0.2.1` build; the peer ranges now carry `^0.2.1-rc.1`. Preparing tool-call blocks gained a lazy `args` view in this line, which the media tool views do not read. The caret range covers the later `0.2.1-rc` builds; the `0.2.1-alpha.2` / `0.2.1-alpha.3` builds, which it excludes, are listed explicitly.
 
-Version `0.9.7` added support for DSH `0.2.0-rc.2`, with development dependencies pinned to that runtime. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. Other `0.2` prereleases are not implicitly allowed.
+Version `0.9.7` added support for DSH `0.2.0-rc.2`; DSH `0.2.1-alpha.2`, `0.2.1-alpha.3`, `0.2.1-rc.2` and `0.2.1-rc.3` are supported as well, with development dependencies pinned to `0.2.1-rc.2`. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. `0.2.1-rc.2` additionally requires tool arguments on every call head and takes the web runtime's provider overrides as `Volatile` refs. Other `0.2` prereleases are not implicitly allowed.
+
+In DSH `0.2.1-rc.2`, the load-time check uses `engines.dsh` when declared; otherwise, every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*` peer must match the running DSH version. Prereleases participate in this check. This plugin does not declare `engines.dsh`, so its DSH peer ranges determine whether it can load. The `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` peers affect package-manager dependency resolution, not this load-time check. They keep their `^4.0.1` / `^3.18.1` floors and also list the `4.0.5-alpha` / `3.18.5-alpha` builds bundled with DSH `0.2.1-alpha.2` and `0.2.1-alpha.3`, because those caret ranges exclude these prereleases under npm's default semver rules.
 
 The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified.
 
@@ -333,7 +337,7 @@ This plugin only supplies model routes. Approval policy lives elsewhere:
 ## Develop
 
 ```sh
-pnpm install   # development baseline: published DSH 0.2.1-rc.1 packages
+pnpm install   # development baseline: published DSH 0.2.1-rc.2 packages
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```

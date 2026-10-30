@@ -40,7 +40,7 @@ import { proxiedFetch } from '../http.js'
 import { MUSE_ATTESTATION_NOTICE, MUSE_BUILTIN_TOOL_NAMESPACE } from './muse-builtin-tools.js'
 import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
 import type { ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js'
-import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import { boundResponsesCallIds, streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ReasoningReplayItem, ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
 import {
   deterministicSessionId,
@@ -851,7 +851,11 @@ export function museRequestBody(
   return {
     model: options.model,
     ...instructions === undefined ? {} : { instructions },
-    input: resolved.input,
+    // [2026-10-30]-[a session that switched to Muse from another route keeps
+    // that route's tool call ids; OpenAI-compatible routers mint composite
+    // `call_…|fc_…` ids up to 83 chars and Meta's gateway refuses the whole
+    // request ("`input[n].call_id` … must be `<= 64`"), wedging the session]
+    input: boundResponsesCallIds(resolved.input),
     ...tools === undefined ? {} : { tools, tool_choice: 'auto', parallel_tool_calls: true },
     ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
     ...options.reasoningEffort !== undefined

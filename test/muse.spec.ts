@@ -254,6 +254,30 @@ test('museRequestBody declares Muse Code\'s builtin tool namespace ahead of the 
   assert.equal(museRequestBody(options, toResponsesInput([USER])).instructions, MUSE_ATTESTATION_NOTICE)
 })
 
+test('museRequestBody bounds another route\'s oversized call ids to Meta\'s 64-char limit', () => {
+  // Real ids left in history by an OpenAI-compatible router before the
+  // session switched back to Muse (gateway answered 400 on input[n].call_id).
+  const long = 'call_cb8fu3mIV3ftMs2f9HyuUKYY|fc_0cb8925ddcddc216016ae454875f0487d2bfc0112340f5a06f'
+  const short = 'call_own_muse_id'
+  const resolved = {
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      { type: 'function_call', call_id: long, name: 'bash', arguments: '{}' },
+      { type: 'function_call_output', call_id: long, output: 'ok' },
+      { type: 'function_call', call_id: short, name: 'bash', arguments: '{}' },
+      { type: 'function_call_output', call_id: short, output: 'ok' },
+    ],
+  }
+  const options = { provider: 'muse', model: 'm', messages: [USER] } as unknown as GenerateOptions
+  const input = museRequestBody(options, resolved).input as Array<Record<string, unknown>>
+  const ids = input.map(item => item.call_id).filter((id): id is string => typeof id === 'string')
+  assert.ok(ids.every(id => id.length <= 64))
+  assert.equal(input[1]?.call_id, input[2]?.call_id, 'a call and its output stay paired')
+  assert.notEqual(input[1]?.call_id, long)
+  assert.equal(input[3]?.call_id, short, 'ids within the limit pass verbatim')
+  assert.deepEqual(museRequestBody(options, resolved).input, input, 'deterministic across requests (prompt cache)')
+})
+
 test('the builtin namespace carries every Muse Code 1.4.14 tool exactly once', () => {
   assert.deepEqual(MUSE_BUILTIN_TOOL_NAMES, [
     'workflow', 'read_file', 'search', 'write_file', 'edit_file', 'read_memory', 'add_memory', 'edit_memory',

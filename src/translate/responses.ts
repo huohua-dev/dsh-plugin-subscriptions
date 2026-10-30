@@ -13,6 +13,7 @@ import {
   LlmError,
   QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
 import { ToolCallId } from '../compat.js'
 import type {
   ContentBlock,
@@ -52,6 +53,63 @@ export interface ReasoningReplayItem {
   status?: string
   /** Encrypted reasoning payload; the reason the item is worth replaying. */
   encrypted_content: string
+}
+
+/** Longest `call_id` the OpenAI Responses schema (and Meta's Muse gateway) accepts. */
+export const RESPONSES_CALL_ID_MAX_LENGTH = 64
+const RESPONSES_CALL_ID_PREFIX = 'call_'
+
+/**
+ * Bound tool-call ids at a provider's wire boundary. Opt-in per adapter (Codex,
+ * Muse) rather than inside {@link toResponsesInput}, so routes that accept
+ * long ids (Grok) keep theirs verbatim. Short ids stay verbatim. Oversized
+ * ids — typically another route's history after a model switch, e.g. the
+ * composite `call_…|fc_…` ids OpenAI-compatible routers mint — become
+ * deterministic hashes, and every id already present in this request is
+ * reserved first so a generated id cannot collide with a legitimate short
+ * one (or another oversized id). Deterministic mapping keeps each
+ * function_call paired with its output and the request prefix cache-stable.
+ * @param input - Responses input items.
+ * @returns input whose function_call / function_call_output ids fit the limit.
+ */
+export function boundResponsesCallIds(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'] {
+  const mapping = new Map<string, string>()
+  const used = new Set<string>()
+  const callId = (item: Record<string, unknown>): string | undefined =>
+    (item.type === 'function_call' || item.type === 'function_call_output') && typeof item.call_id === 'string'
+      ? item.call_id
+      : undefined
+
+  for (const item of input) {
+    const id = callId(item)
+    if (id !== undefined && id.length <= RESPONSES_CALL_ID_MAX_LENGTH) {
+      mapping.set(id, id)
+      used.add(id)
+    }
+  }
+
+  for (const item of input) {
+    const id = callId(item)
+    if (id === undefined || mapping.has(id)) continue
+    let attempt = 0
+    let normalized: string
+    do {
+      const hash = createHash('sha256')
+      if (attempt > 0) hash.update(String(attempt)).update('\0')
+      const digest = hash.update(id).digest('hex')
+      normalized = `${RESPONSES_CALL_ID_PREFIX}${digest.slice(0, RESPONSES_CALL_ID_MAX_LENGTH - RESPONSES_CALL_ID_PREFIX.length)}`
+      attempt += 1
+    } while (used.has(normalized))
+    mapping.set(id, normalized)
+    used.add(normalized)
+  }
+
+  return input.map((item) => {
+    const id = callId(item)
+    if (id === undefined) return item
+    const normalized = mapping.get(id) ?? id
+    return normalized === id ? item : { ...item, call_id: normalized }
+  })
 }
 
 /** Flatten a tool result's content to plain text for `function_call_output`. */

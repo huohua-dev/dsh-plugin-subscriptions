@@ -35,6 +35,22 @@ export interface ReasoningReplayItem {
     /** Encrypted reasoning payload; the reason the item is worth replaying. */
     encrypted_content: string;
 }
+/** Longest `call_id` the OpenAI Responses schema (and Meta's Muse gateway) accepts. */
+export declare const RESPONSES_CALL_ID_MAX_LENGTH = 64;
+/**
+ * Bound tool-call ids at a provider's wire boundary. Opt-in per adapter (Codex,
+ * Muse) rather than inside {@link toResponsesInput}, so routes that accept
+ * long ids (Grok) keep theirs verbatim. Short ids stay verbatim. Oversized
+ * ids — typically another route's history after a model switch, e.g. the
+ * composite `call_…|fc_…` ids OpenAI-compatible routers mint — become
+ * deterministic hashes, and every id already present in this request is
+ * reserved first so a generated id cannot collide with a legitimate short
+ * one (or another oversized id). Deterministic mapping keeps each
+ * function_call paired with its output and the request prefix cache-stable.
+ * @param input - Responses input items.
+ * @returns input whose function_call / function_call_output ids fit the limit.
+ */
+export declare function boundResponsesCallIds(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'];
 /**
  * Convert harness messages into Responses `instructions` + `input` items.
  * System-role messages become `instructions`; an explicit `system` argument

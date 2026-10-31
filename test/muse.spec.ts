@@ -19,7 +19,8 @@ import {
   completeMuseLogin,
   fetchMuseModels,
   fetchMuseUsage,
-  museIdleUsage,
+  activateMuseUsage,
+  MUSE_USAGE_ACTIVATION_PROMPT,
   museStreamSubscriptionUsage,
   isMusePermanentRefreshError,
   museAnnouncesAction,
@@ -41,7 +42,7 @@ import {
   MUSE_BUILTIN_TOOL_NAMESPACE,
   MUSE_BUILTIN_TOOL_NAMES,
 } from '../src/providers/muse-builtin-tools.js'
-import type { MuseReplayResponse, MuseSubscriptionUsageWire, MuseUsageMemory } from '../src/providers/muse.js'
+import type { MuseReplayResponse, MuseSubscriptionUsageWire } from '../src/providers/muse.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { DeviceFlowManager } from '../src/auth/device-flow.js'
 import { accountKeyOf } from '../src/auth/store.js'
@@ -160,57 +161,56 @@ test('museUsageFromKey maps the 5-hour and weekly windows with second-based rese
   assert.equal(odd.windows?.[0]?.kind, 'other', 'a non-5-hour short window is not mislabelled')
 })
 
-/** An in-memory {@link MuseUsageMemory}. */
-function usageMemory(initial?: MuseSubscriptionUsageWire) {
-  let stored = initial
-  const remembered: MuseSubscriptionUsageWire[] = []
-  const memory: MuseUsageMemory = {
-    recall: () => Promise.resolve(stored),
-    remember: (usage) => { stored = usage; remembered.push(usage) },
-  }
-  return { memory, remembered }
+test('an idle mint (no subs_usage) reports no windows', async () => {
+  const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: 0 }
+  const usage = await fetchMuseUsage(session, recordingFetch(() => json({ ...MINT, subs_usage: undefined })).fetchFn)
+  assert.deepEqual(usage, { supported: true, plan: 'Muse Code Everyday Usage', windows: [] })
+})
+
+const SUBSCRIPTION = {
+  tier: '1',
+  weekly: { resets_at: 1_793_577_600, used_percent: 99 },
+  window: { resets_at: 1_793_453_401, used_percent: 0, window_duration_mins: 300 },
 }
 
-test('an idle mint (no subs_usage) reads as an unused 5-hour window plus the remembered weekly lane', async () => {
-  const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: 0, plan: 'Muse Code Power Usage' }
-  const idleMint = { ...MINT, subs_usage: undefined }
-  const future = Math.floor(Date.now() / 1000) + 86_400
-  const { memory } = usageMemory({
-    window: { used_percent: 80, window_duration_mins: 300, resets_at: 1_000 },
-    weekly: { used_percent: 67, resets_at: future },
+test('activateMuseUsage sends the minimal prompt and reads the usage frame, re-minting once on a 401', async () => {
+  const { calls, fetchFn } = recordingFetch((_url, _init, index) => index === 0
+    ? json({ error: { message: 'expired' } }, 401)
+    : sse([{ type: 'response.subscription_usage', subscription: SUBSCRIPTION }, ...TEXT_EVENTS]))
+  const usage = await activateMuseUsage('LLM|old', 'muse-spark-1.3', fetchFn, undefined, () => Promise.resolve('LLM|new'))
+  assert.deepEqual(usage, SUBSCRIPTION)
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1]?.url, MUSE_API_URL)
+  assert.equal((calls[1]?.init?.headers as Record<string, string>).authorization, 'Bearer LLM|new')
+  const body = JSON.parse(String(calls[1]?.init?.body)) as Record<string, unknown>
+  assert.deepEqual(body, {
+    model: 'muse-spark-1.3',
+    input: [{ role: 'user', content: [{ type: 'input_text', text: MUSE_USAGE_ACTIVATION_PROMPT }] }],
+    reasoning: { effort: 'minimal' },
+    max_output_tokens: 16,
+    store: false,
+    stream: true,
   })
-  const usage = await fetchMuseUsage(session, recordingFetch(() => json(idleMint)).fetchFn, undefined, memory)
-  assert.deepEqual(usage, {
-    supported: true,
-    plan: 'Muse Code Everyday Usage',
-    windows: [
-      { kind: 'session', usedPercent: 0 },
-      { kind: 'weekly', usedPercent: 67, resetsAt: future * 1000 },
-    ],
-  })
-  // Nothing remembered yet: the 5-hour lane is still known to be unused.
-  const cold = await fetchMuseUsage(session, recordingFetch(() => json(idleMint)).fetchFn)
-  assert.deepEqual(cold.windows, [{ kind: 'session', usedPercent: 0 }])
+  assert.equal(MUSE_USAGE_ACTIVATION_PROMPT, '1+1=?')
+  // No frame: nothing to report. A refusal surfaces as an error.
+  assert.equal(await activateMuseUsage('LLM|k', 'm', recordingFetch(() => sse(TEXT_EVENTS)).fetchFn), undefined)
+  await assert.rejects(activateMuseUsage('LLM|k', 'm', recordingFetch(() => json({ error: { message: 'no' } }, 403)).fetchFn))
 })
 
-test('museIdleUsage zeroes a remembered weekly lane past its reset and keeps a still-running window', () => {
-  const now = 2_000_000_000_000
-  const usage = museIdleUsage({
-    window: { used_percent: 30, window_duration_mins: 300, resets_at: now / 1000 + 60 },
-    weekly: { used_percent: 90, resets_at: now / 1000 - 60 },
-  }, undefined, now)
-  assert.deepEqual(usage.windows, [
-    { kind: 'session', usedPercent: 30, resetsAt: now + 60_000 },
-    { kind: 'weekly', usedPercent: 0 },
-  ])
-})
-
-test('fetchMuseUsage remembers what an active mint reports', async () => {
-  const { memory, remembered } = usageMemory()
-  const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: 0 }
-  const usage = await fetchMuseUsage(session, recordingFetch(() => json(MINT)).fetchFn, undefined, memory)
-  assert.equal(usage.windows?.length, 2)
-  assert.deepEqual(remembered, [MINT.subs_usage])
+test('MuseAdapter.activateUsage sends on the account\'s first model and reports to the usage sink', async () => {
+  const reports: { account: string; usage: MuseSubscriptionUsageWire }[] = []
+  const { calls, fetchFn } = recordingFetch(() => sse([{ type: 'response.subscription_usage', subscription: SUBSCRIPTION }, ...TEXT_EVENTS]))
+  const adapter = new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens({ accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }),
+    discovery: false,
+    fetchFn,
+    onSubscriptionUsage: (account, usage) => { reports.push({ account, usage }) },
+  })
+  assert.deepEqual(await adapter.activateUsage('acct'), SUBSCRIPTION)
+  assert.equal(JSON.parse(String(calls[0]?.init?.body)).model, 'muse-spark-1.3')
+  assert.deepEqual(reports, [{ account: 'acct', usage: SUBSCRIPTION }])
 })
 
 test('the subscription usage frame opening a response stream reaches the usage sink', async () => {

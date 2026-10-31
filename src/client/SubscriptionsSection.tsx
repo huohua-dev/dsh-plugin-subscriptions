@@ -988,7 +988,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         <p style={styles.errorLine}>{t('usageError', { message: usageError })}</p>
                       )}
                       {usage?.windows !== undefined && usage.windows.length === 0 && (
-                        <p style={styles.statusLine}>{t('usageEmpty')}</p>
+                        <p style={styles.statusLine}>{t(id === 'muse' ? 'usageEmptyMuse' : 'usageEmpty')}</p>
                       )}
                       {usage?.windows !== undefined && usage.windows.length > 0 && shownWindows.length === 0 && (
                         <p style={styles.statusLine}>{t('usageNoVisibleModels')}</p>

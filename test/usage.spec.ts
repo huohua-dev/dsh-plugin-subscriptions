@@ -421,6 +421,30 @@ test('usage(): a manual (forced) refresh is the "retry now" that clears the acco
   assert.deepEqual(recovered, ['codex/a1'])
 })
 
+test('usage(): only a manual refresh of an empty answer activates the account, and the result is cached', async () => {
+  let fetches = 0
+  const activations: string[] = []
+  const poolUsage = new PoolUsageTracker((provider, account) =>
+    provider === 'muse' && account === 'm1'
+      ? () => { fetches += 1; return Promise.resolve({ supported: true, windows: [], plan: 'Power' }) }
+      : undefined)
+  const activated: ProviderUsage = { supported: true, windows: [{ kind: 'weekly', usedPercent: 99 }] }
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { muse: unreachableFetcher }, undefined, poolUsage, {}, {}, undefined, undefined,
+    { muse: (account) => { activations.push(account); return Promise.resolve(activated) } },
+  )
+  const plain = await controller.usage('muse', 'm1', new AbortController().signal)
+  assert.deepEqual(plain.windows, [])
+  assert.deepEqual(activations, [], 'automatic reads never spend a request')
+  const forced = await controller.usage('muse', 'm1', new AbortController().signal, true)
+  assert.deepEqual(activations, ['m1'])
+  assert.deepEqual(forced, { ...activated, plan: 'Power' }, 'the plan from the mint is kept')
+  const after = await controller.usage('muse', 'm1', new AbortController().signal)
+  assert.deepEqual(after, forced, 'the activated usage is served from the cache')
+  assert.equal(fetches, 2)
+})
+
 test('usage(): pool cache and RPC preserve reset credits and optional errors', async () => {
   let snapshot: ProviderUsage = { supported: true, windows: [], resetCredits: [{ expiresAt: 1791152194306 }] }
   const tracker = new PoolUsageTracker(() => async () => snapshot)

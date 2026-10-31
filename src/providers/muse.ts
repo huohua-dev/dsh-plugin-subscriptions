@@ -41,6 +41,7 @@ import { MUSE_ATTESTATION_NOTICE, MUSE_BUILTIN_TOOL_NAMESPACE } from './muse-bui
 import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
 import type { ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js'
 import { boundResponsesCallIds, streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import { parseSse } from '../translate/sse.js'
 import type { ReasoningReplayItem, ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
 import {
   deterministicSessionId,
@@ -207,15 +208,6 @@ export interface MuseKeyResponse {
 }
 
 /**
- * Per-account memory of the last usage Meta disclosed (mint or stream), so an
- * idle account's weekly lane stays known while the mint is silent about it.
- */
-export interface MuseUsageMemory {
-  recall(): Promise<MuseSubscriptionUsageWire | undefined>
-  remember(usage: MuseSubscriptionUsageWire): void
-}
-
-/**
  * Exchange the Meta identity token for the Model API key. A 401/403 means
  * the identity is revoked or expired — permanent, re-login required.
  * @param identityToken - the OIDC identity token from the device flow.
@@ -347,26 +339,6 @@ function museReportsWindows(wire: MuseSubscriptionUsageWire | undefined): wire i
 }
 
 /**
- * The usage of an account whose mint reported no windows: no 5-hour window is
- * running, so that lane is unused (0%). The weekly lane cannot have moved since
- * Meta last reported it — any request would have opened a 5-hour window — so
- * the remembered value stands until its reset, and reads 0% after it.
- * @param remembered - the last usage Meta disclosed for the account, if any.
- * @param plan - the tier name to show, when known.
- * @param now - clock (tests pin it).
- */
-export function museIdleUsage(remembered: MuseSubscriptionUsageWire | undefined, plan?: string, now = Date.now()): ProviderUsage {
-  const lapsed = (window: UsageWindow | undefined): boolean =>
-    window === undefined || (window.resetsAt !== undefined && window.resetsAt <= now)
-  const windows: UsageWindow[] = []
-  const short = museWindow(museShortKind(remembered?.window), remembered?.window)
-  windows.push(lapsed(short) ? { kind: short?.kind ?? 'session', usedPercent: 0 } : short!)
-  const weekly = museWindow('weekly', remembered?.weekly)
-  if (weekly !== undefined) windows.push(lapsed(weekly) ? { kind: 'weekly', usedPercent: 0 } : weekly)
-  return { supported: true, windows, ...plan === undefined ? {} : { plan } }
-}
-
-/**
  * Read the `subscription` of a `response.subscription_usage` stream frame.
  * @returns the reported usage, or undefined for any other event or a malformed frame.
  */
@@ -380,28 +352,75 @@ export function museStreamSubscriptionUsage(event: { type?: unknown; subscriptio
 /**
  * Fetch the subscription usage through the (idempotent) key mint. An idle
  * account mints without any usage (see {@link MuseKeyResponse.subs_usage});
- * its windows then come from {@link museIdleUsage} instead of reading as
- * "no usage reported" until the account is used again.
+ * the manual Refresh then activates it with {@link activateMuseUsage}.
  * @param session - the stored session (its identity token authorizes the mint).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
- * @param memory - the account's remembered usage (records what the mint reports).
  * @returns the mapped usage snapshot.
  */
 export async function fetchMuseUsage(
   session: MuseSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
-  memory?: MuseUsageMemory,
 ): Promise<ProviderUsage> {
   const minted = await mintMuseKey(session.refreshToken, fetchFn, signal)
-  const plan = nonEmpty(minted.subs_tier_name) ?? session.plan
-  if (museReportsWindows(minted.subs_usage)) {
-    memory?.remember(minted.subs_usage)
-    return museUsageFromWire(minted.subs_usage, plan)
+  return museUsageFromWire(minted.subs_usage, nonEmpty(minted.subs_tier_name) ?? session.plan)
+}
+
+/** The prompt that opens an idle account's usage window: as small as a request gets. */
+export const MUSE_USAGE_ACTIVATION_PROMPT = '1+1=?'
+
+/**
+ * Open an idle account's 5-hour window with the smallest possible request
+ * ({@link MUSE_USAGE_ACTIVATION_PROMPT}, minimal effort, a 16-token cap) and
+ * read the usage Meta reports in the frame that opens the stream. The stream
+ * is cancelled as soon as that frame arrives, so the answer is never
+ * generated in full; the window is already running at that point (live-verified
+ * 2026-10-31: the mint reported usage right after a request cancelled there).
+ * @param apiKey - the account's Model API key.
+ * @param model - a chat model the account may use.
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation.
+ * @param rekey - re-mints the key after a 401 (one retry).
+ * @returns the reported usage, or undefined when the stream carried none.
+ * @throws LlmError when Meta refuses the request.
+ */
+export async function activateMuseUsage(
+  apiKey: string,
+  model: string,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+  rekey?: () => Promise<string>,
+): Promise<MuseSubscriptionUsageWire | undefined> {
+  const send = (key: string): Promise<Response> => fetchFn(MUSE_API_URL, {
+    method: 'POST',
+    headers: museHeaders(key, undefined),
+    body: JSON.stringify({
+      model,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: MUSE_USAGE_ACTIVATION_PROMPT }] }],
+      reasoning: { effort: 'minimal' },
+      max_output_tokens: 16,
+      store: false,
+      stream: true,
+    }),
+    ...signal === undefined ? {} : { signal },
+  })
+  let response = await send(apiKey)
+  if (response.status === 401 && rekey !== undefined) {
+    await response.body?.cancel().catch(() => undefined)
+    response = await send(await rekey())
   }
-  if (minted.is_subs_active === false) return museUsageFromWire(undefined, plan)
-  return museIdleUsage(await memory?.recall(), plan)
+  if (!response.ok) throw await httpLlmError(response, 'muse usage activation')
+  if (response.body === null) return undefined
+  // Leaving the loop cancels the body (parseSse's finally).
+  for await (const event of parseSse(response.body)) {
+    let parsed: unknown
+    try { parsed = JSON.parse(event.data) } catch { continue }
+    if (typeof parsed !== 'object' || parsed === null) continue
+    const usage = museStreamSubscriptionUsage(parsed as { type?: unknown; subscription?: unknown })
+    if (usage !== undefined) return usage
+  }
+  return undefined
 }
 
 /** Static reasoning block every Muse chat model advertises. */
@@ -1211,6 +1230,27 @@ export class MuseAdapter extends LlmAdapter {
   async probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
     if (!this.options.discovery) return this.staticModels(provider)
     return this.listed(provider, await this.fetchCatalog(account, signal))
+  }
+
+  /**
+   * Open an idle account's usage window with one minimal request (see
+   * {@link activateMuseUsage}), on the first model the account lists. The
+   * report also reaches {@link MuseAdapterOptions.onSubscriptionUsage}.
+   * @param account - the canonical account key.
+   * @param signal - caller cancellation.
+   * @returns the reported usage, or undefined when Meta reported none.
+   */
+  async activateUsage(account: string, signal?: AbortSignal): Promise<MuseSubscriptionUsageWire | undefined> {
+    const listed = await this.listOwnModels('muse', account, signal, true)
+    const model = listed[0]?.id ?? this.options.models[0]?.id
+    if (model === undefined) throw new LlmError('muse usage activation: this account lists no model to send the request to', 'MODEL_NOT_FOUND')
+    const session = await this.options.tokens.session(account)
+    const usage = await activateMuseUsage(session.accessToken, model, this.fetchFn, signal,
+      async () => (await this.options.tokens.session(account, true)).accessToken)
+    if (usage !== undefined) {
+      try { this.options.onSubscriptionUsage?.(account, usage) } catch { /* best effort */ }
+    }
+    return usage
   }
 
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {

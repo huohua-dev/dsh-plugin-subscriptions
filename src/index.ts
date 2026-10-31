@@ -146,7 +146,6 @@ import {
   museUsageFromWire,
   refreshMuse,
 } from './providers/muse.js'
-import { MuseUsageMemo } from './providers/muse-usage-memo.js'
 import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -386,6 +385,12 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
 /** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
 type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
 
+/** Per-provider usage activation for idle accounts; undefined when nothing was reported. */
+type UsageActivators = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage | undefined>>>
+
+/** Bound on one usage activation request (the usage frame opens the stream within seconds). */
+const USAGE_ACTIVATION_TIMEOUT_MS = 45_000
+
 /**
  * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
  * OAuth attempts in the background, feed pasted codes, cancel, log out, and
@@ -471,6 +476,12 @@ export class SubscriptionsAuthController implements AuthController {
      * failure must not outlive an explicit re-check (issue #139).
      */
     private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
+    /**
+     * Manual-refresh fallback for providers that report nothing while idle
+     * (Muse: no usage until a 5-hour window runs): sends the smallest request
+     * to open the window and answers with the usage it reports.
+     */
+    private readonly usageActivators: UsageActivators = {},
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -483,12 +494,22 @@ export class SubscriptionsAuthController implements AuthController {
     await this.resetRedemption.redeem(account, ticket, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
   }
 
-  usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
+  async usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
     if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
-    if (fetcher === undefined) return Promise.resolve({ supported: false })
-    if (this.poolUsage === undefined) return fetcher(account, signal)
-    return this.poolUsage.snapshotFor(provider, account, force)
+    if (fetcher === undefined) return { supported: false }
+    const usage = this.poolUsage === undefined
+      ? await fetcher(account, signal)
+      : await this.poolUsage.snapshotFor(provider, account, force)
+    // Only the manual Refresh spends a request on an empty answer; automatic
+    // reads (page load, badge polls, routing) never do.
+    const activate = this.usageActivators[provider]
+    if (!force || activate === undefined || usage.supported === false || (usage.windows?.length ?? 0) > 0) return usage
+    const activated = await activate(account, AbortSignal.any([signal, AbortSignal.timeout(USAGE_ACTIVATION_TIMEOUT_MS)]))
+    if (activated === undefined) return usage
+    const shown = activated.plan === undefined && usage.plan !== undefined ? { ...activated, plan: usage.plan } : activated
+    this.poolUsage?.record(provider, account, shown)
+    return shown
   }
 
   async readImage(ref: ImageAttachmentRef, signal: AbortSignal): Promise<ImageBytesResult> {
@@ -857,6 +878,7 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
+  const usageActivators: UsageActivators = {}
   // Explicit Speed choices are per-session and reset on restart. Subagents
   // without an explicit choice use their persisted model default. Every
   // request still gates Fast on the model's discovered capability.
@@ -1097,12 +1119,9 @@ export function apply(ctx: Context, config: Config): void {
         accountTokens.set('muse', tokens as AccountTokenManager<StoredSession>)
         // The usage source is the idempotent key mint, authorized by the
         // identity token; peek avoids a pointless re-mint of the stored key.
-        // An idle account mints without usage, so the last usage Meta
-        // reported (mint or stream) is remembered per account.
-        const museUsage = new MuseUsageMemo()
         usageFetchers.muse = async (account, signal) => accountScoped('muse', account, async () => {
           const session = await tokens.peek(account) ?? await tokens.session(account)
-          return fetchMuseUsage(session, proxiedFetch, signal, museUsage.forAccount(account))
+          return fetchMuseUsage(session, proxiedFetch, signal)
         })
         const adapter = new MuseAdapter({
           models: catalog.muse,
@@ -1117,13 +1136,18 @@ export function apply(ctx: Context, config: Config): void {
           accountCatalogStore: account => accountCatalogStore('muse', account),
           defaultEffortOf: model => defaultEffortOf('muse', model),
           continueDanglingStop: config.museAutoContinue !== false,
-          // Every response opens with the account's usage: remember it, and
-          // refresh the shared usage cache the Settings page and routing read.
+          // Every response opens with the account's usage: refresh the shared
+          // usage cache the Settings page and routing read.
           onSubscriptionUsage: (account, usage) => {
-            museUsage.remember(account, usage)
             poolUsage?.record('muse', account, museUsageFromWire(usage))
           },
           pool: () => poolAdapter,
+        })
+        // An idle account mints without any usage: the manual Refresh opens
+        // its window with one minimal request and shows what that reports.
+        usageActivators.muse = async (account, signal) => accountScoped('muse', account, async () => {
+          const usage = await adapter.activateUsage(account, signal)
+          return usage === undefined ? undefined : museUsageFromWire(usage, (await tokens.peek(account))?.plan)
         })
         adapters.set('muse', adapter)
         handles.set('muse', register('muse', adapter))
@@ -1378,6 +1402,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     resetRedemption,
     (provider, account) => poolHealth?.clear(provider, account),
+    usageActivators,
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),

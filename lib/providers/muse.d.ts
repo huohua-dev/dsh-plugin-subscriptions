@@ -91,6 +91,16 @@ interface MuseUsageWindowWire {
     /** Epoch SECONDS at which the window resets. */
     resets_at?: number;
 }
+/**
+ * Subscription usage as Meta reports it: the mint response's `subs_usage`,
+ * and the `subscription` of the `response.subscription_usage` frame that
+ * opens every inference stream.
+ */
+export interface MuseSubscriptionUsageWire {
+    window?: MuseUsageWindowWire;
+    weekly?: MuseUsageWindowWire;
+    tier?: string;
+}
 /** The mint response subset this plugin reads. */
 export interface MuseKeyResponse {
     api_key?: string;
@@ -101,11 +111,23 @@ export interface MuseKeyResponse {
     require_payment?: boolean;
     action_url?: string | null;
     subs_tier_name?: string;
-    subs_usage?: {
-        window?: MuseUsageWindowWire;
-        weekly?: MuseUsageWindowWire;
-        tier?: string;
-    };
+    /**
+     * Present only while a 5-hour window is running. A window opens with the
+     * first request after the previous one lapsed, so an account left idle for
+     * five hours mints with no `subs_usage` at all — the weekly lane included,
+     * even when part of it is spent (live-verified 2026-10-31: an idle mint
+     * omitted it, one request later the stream and the mint both reported
+     * weekly 67%).
+     */
+    subs_usage?: MuseSubscriptionUsageWire;
+}
+/**
+ * Per-account memory of the last usage Meta disclosed (mint or stream), so an
+ * idle account's weekly lane stays known while the mint is silent about it.
+ */
+export interface MuseUsageMemory {
+    recall(): Promise<MuseSubscriptionUsageWire | undefined>;
+    remember(usage: MuseSubscriptionUsageWire): void;
 }
 /**
  * Exchange the Meta identity token for the Model API key. A 401/403 means
@@ -146,13 +168,41 @@ export declare function isMusePermanentRefreshError(error: unknown): boolean;
  */
 export declare function museUsageFromKey(minted: MuseKeyResponse): ProviderUsage;
 /**
- * Fetch the subscription usage through the (idempotent) key mint.
+ * Map one reported subscription usage (mint or stream) to the usage RPC shape.
+ * @param wire - the `subs_usage` / `subscription` object.
+ * @param plan - the tier name to show, when known.
+ */
+export declare function museUsageFromWire(wire: MuseSubscriptionUsageWire | undefined, plan?: string): ProviderUsage;
+/**
+ * The usage of an account whose mint reported no windows: no 5-hour window is
+ * running, so that lane is unused (0%). The weekly lane cannot have moved since
+ * Meta last reported it — any request would have opened a 5-hour window — so
+ * the remembered value stands until its reset, and reads 0% after it.
+ * @param remembered - the last usage Meta disclosed for the account, if any.
+ * @param plan - the tier name to show, when known.
+ * @param now - clock (tests pin it).
+ */
+export declare function museIdleUsage(remembered: MuseSubscriptionUsageWire | undefined, plan?: string, now?: number): ProviderUsage;
+/**
+ * Read the `subscription` of a `response.subscription_usage` stream frame.
+ * @returns the reported usage, or undefined for any other event or a malformed frame.
+ */
+export declare function museStreamSubscriptionUsage(event: {
+    type?: unknown;
+    subscription?: unknown;
+}): MuseSubscriptionUsageWire | undefined;
+/**
+ * Fetch the subscription usage through the (idempotent) key mint. An idle
+ * account mints without any usage (see {@link MuseKeyResponse.subs_usage});
+ * its windows then come from {@link museIdleUsage} instead of reading as
+ * "no usage reported" until the account is used again.
  * @param session - the stored session (its identity token authorizes the mint).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
+ * @param memory - the account's remembered usage (records what the mint reports).
  * @returns the mapped usage snapshot.
  */
-export declare function fetchMuseUsage(session: MuseSession, fetchFn?: FetchFn, signal?: AbortSignal): Promise<ProviderUsage>;
+export declare function fetchMuseUsage(session: MuseSession, fetchFn?: FetchFn, signal?: AbortSignal, memory?: MuseUsageMemory): Promise<ProviderUsage>;
 /** Display name for a model id the catalog does not name (`muse-spark-1.3-contributor` → `Muse Spark 1.3 Contributor`). */
 export declare function museModelName(id: string): string;
 /**
@@ -346,6 +396,11 @@ export interface MuseAdapterOptions {
     continuationRetryMs?: readonly number[];
     /** Clock for the blocked-network recheck window (tests advance it). */
     now?: () => number;
+    /**
+     * Receives the subscription usage Meta reports at the start of every
+     * response stream, keyed by the account that sent the request.
+     */
+    onSubscriptionUsage?: (account: string, usage: MuseSubscriptionUsageWire) => void;
 }
 /** Muse wire adapter: one instance serves the `muse` provider route. */
 export declare class MuseAdapter extends LlmAdapter {

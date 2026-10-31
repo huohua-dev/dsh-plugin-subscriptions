@@ -70,6 +70,12 @@ export declare class PoolUsageTracker {
      * @returns `{ supported: false }` when the provider has no usage fetcher.
      */
     snapshotFor(provider: ProviderId, account: string, force?: boolean): Promise<ProviderUsage>;
+    /**
+     * Store a snapshot the provider pushed on its own (Muse reports usage at the
+     * start of every response stream), as fresh as a completed fetch. A snapshot
+     * without a plan keeps the plan already on record.
+     */
+    record(provider: ProviderId, account: string, snapshot: ProviderUsage): void;
     /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
     invalidate(provider: ProviderId, account?: string): void;
     /**

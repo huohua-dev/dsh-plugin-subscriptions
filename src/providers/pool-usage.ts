@@ -168,6 +168,18 @@ export class PoolUsageTracker {
     }
   }
 
+  /**
+   * Store a snapshot the provider pushed on its own (Muse reports usage at the
+   * start of every response stream), as fresh as a completed fetch. A snapshot
+   * without a plan keeps the plan already on record.
+   */
+  record(provider: ProviderId, account: string, snapshot: ProviderUsage): void {
+    const key = `${provider}/${account}`
+    const prior = this.entries.get(key)
+    const plan = snapshot.plan ?? (prior?.snapshot ?? prior?.lastSnapshot)?.plan
+    this.entries.set(key, { snapshot: plan === undefined ? snapshot : { ...snapshot, plan }, at: Date.now() })
+  }
+
   /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
   invalidate(provider: ProviderId, account?: string): void {
     if (account !== undefined) {

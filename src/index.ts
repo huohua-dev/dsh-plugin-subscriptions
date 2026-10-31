@@ -143,8 +143,10 @@ import {
   fetchMuseUsage,
   isMusePermanentRefreshError,
   museDeviceFlow,
+  museUsageFromWire,
   refreshMuse,
 } from './providers/muse.js'
+import { MuseUsageMemo } from './providers/muse-usage-memo.js'
 import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
@@ -1095,9 +1097,12 @@ export function apply(ctx: Context, config: Config): void {
         accountTokens.set('muse', tokens as AccountTokenManager<StoredSession>)
         // The usage source is the idempotent key mint, authorized by the
         // identity token; peek avoids a pointless re-mint of the stored key.
+        // An idle account mints without usage, so the last usage Meta
+        // reported (mint or stream) is remembered per account.
+        const museUsage = new MuseUsageMemo()
         usageFetchers.muse = async (account, signal) => accountScoped('muse', account, async () => {
           const session = await tokens.peek(account) ?? await tokens.session(account)
-          return fetchMuseUsage(session, proxiedFetch, signal)
+          return fetchMuseUsage(session, proxiedFetch, signal, museUsage.forAccount(account))
         })
         const adapter = new MuseAdapter({
           models: catalog.muse,
@@ -1112,6 +1117,12 @@ export function apply(ctx: Context, config: Config): void {
           accountCatalogStore: account => accountCatalogStore('muse', account),
           defaultEffortOf: model => defaultEffortOf('muse', model),
           continueDanglingStop: config.museAutoContinue !== false,
+          // Every response opens with the account's usage: remember it, and
+          // refresh the shared usage cache the Settings page and routing read.
+          onSubscriptionUsage: (account, usage) => {
+            museUsage.remember(account, usage)
+            poolUsage?.record('muse', account, museUsageFromWire(usage))
+          },
           pool: () => poolAdapter,
         })
         adapters.set('muse', adapter)

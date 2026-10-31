@@ -174,6 +174,17 @@ interface MuseUsageWindowWire {
   resets_at?: number
 }
 
+/**
+ * Subscription usage as Meta reports it: the mint response's `subs_usage`,
+ * and the `subscription` of the `response.subscription_usage` frame that
+ * opens every inference stream.
+ */
+export interface MuseSubscriptionUsageWire {
+  window?: MuseUsageWindowWire
+  weekly?: MuseUsageWindowWire
+  tier?: string
+}
+
 /** The mint response subset this plugin reads. */
 export interface MuseKeyResponse {
   api_key?: string
@@ -184,11 +195,24 @@ export interface MuseKeyResponse {
   require_payment?: boolean
   action_url?: string | null
   subs_tier_name?: string
-  subs_usage?: {
-    window?: MuseUsageWindowWire
-    weekly?: MuseUsageWindowWire
-    tier?: string
-  }
+  /**
+   * Present only while a 5-hour window is running. A window opens with the
+   * first request after the previous one lapsed, so an account left idle for
+   * five hours mints with no `subs_usage` at all — the weekly lane included,
+   * even when part of it is spent (live-verified 2026-10-31: an idle mint
+   * omitted it, one request later the stream and the mint both reported
+   * weekly 67%).
+   */
+  subs_usage?: MuseSubscriptionUsageWire
+}
+
+/**
+ * Per-account memory of the last usage Meta disclosed (mint or stream), so an
+ * idle account's weekly lane stays known while the mint is silent about it.
+ */
+export interface MuseUsageMemory {
+  recall(): Promise<MuseSubscriptionUsageWire | undefined>
+  remember(usage: MuseSubscriptionUsageWire): void
 }
 
 /**
@@ -295,33 +319,89 @@ function museWindow(kind: UsageWindow['kind'], wire: MuseUsageWindowWire | undef
  * duration is reported as `other` rather than mislabelled.
  */
 export function museUsageFromKey(minted: MuseKeyResponse): ProviderUsage {
+  return museUsageFromWire(minted.subs_usage, nonEmpty(minted.subs_tier_name))
+}
+
+/** The kind of the short window: the 5-hour session lane, or `other` for any other length. */
+function museShortKind(wire: MuseUsageWindowWire | undefined): UsageWindow['kind'] {
+  return wire?.window_duration_mins === undefined || wire.window_duration_mins === 300 ? 'session' : 'other'
+}
+
+/**
+ * Map one reported subscription usage (mint or stream) to the usage RPC shape.
+ * @param wire - the `subs_usage` / `subscription` object.
+ * @param plan - the tier name to show, when known.
+ */
+export function museUsageFromWire(wire: MuseSubscriptionUsageWire | undefined, plan?: string): ProviderUsage {
   const windows: UsageWindow[] = []
-  const short = minted.subs_usage?.window
-  const shortKind: UsageWindow['kind'] = short?.window_duration_mins === undefined || short.window_duration_mins === 300
-    ? 'session'
-    : 'other'
-  const session = museWindow(shortKind, short)
+  const session = museWindow(museShortKind(wire?.window), wire?.window)
   if (session !== undefined) windows.push(session)
-  const weekly = museWindow('weekly', minted.subs_usage?.weekly)
+  const weekly = museWindow('weekly', wire?.weekly)
   if (weekly !== undefined) windows.push(weekly)
-  const plan = nonEmpty(minted.subs_tier_name)
+  return { supported: true, windows, ...plan === undefined ? {} : { plan } }
+}
+
+/** Whether a reported usage carries at least one usable window. */
+function museReportsWindows(wire: MuseSubscriptionUsageWire | undefined): wire is MuseSubscriptionUsageWire {
+  return museWindow('session', wire?.window) !== undefined || museWindow('weekly', wire?.weekly) !== undefined
+}
+
+/**
+ * The usage of an account whose mint reported no windows: no 5-hour window is
+ * running, so that lane is unused (0%). The weekly lane cannot have moved since
+ * Meta last reported it — any request would have opened a 5-hour window — so
+ * the remembered value stands until its reset, and reads 0% after it.
+ * @param remembered - the last usage Meta disclosed for the account, if any.
+ * @param plan - the tier name to show, when known.
+ * @param now - clock (tests pin it).
+ */
+export function museIdleUsage(remembered: MuseSubscriptionUsageWire | undefined, plan?: string, now = Date.now()): ProviderUsage {
+  const lapsed = (window: UsageWindow | undefined): boolean =>
+    window === undefined || (window.resetsAt !== undefined && window.resetsAt <= now)
+  const windows: UsageWindow[] = []
+  const short = museWindow(museShortKind(remembered?.window), remembered?.window)
+  windows.push(lapsed(short) ? { kind: short?.kind ?? 'session', usedPercent: 0 } : short!)
+  const weekly = museWindow('weekly', remembered?.weekly)
+  if (weekly !== undefined) windows.push(lapsed(weekly) ? { kind: 'weekly', usedPercent: 0 } : weekly)
   return { supported: true, windows, ...plan === undefined ? {} : { plan } }
 }
 
 /**
- * Fetch the subscription usage through the (idempotent) key mint.
+ * Read the `subscription` of a `response.subscription_usage` stream frame.
+ * @returns the reported usage, or undefined for any other event or a malformed frame.
+ */
+export function museStreamSubscriptionUsage(event: { type?: unknown; subscription?: unknown }): MuseSubscriptionUsageWire | undefined {
+  if (event.type !== 'response.subscription_usage') return undefined
+  const wire = event.subscription
+  if (typeof wire !== 'object' || wire === null || Array.isArray(wire)) return undefined
+  return museReportsWindows(wire as MuseSubscriptionUsageWire) ? wire as MuseSubscriptionUsageWire : undefined
+}
+
+/**
+ * Fetch the subscription usage through the (idempotent) key mint. An idle
+ * account mints without any usage (see {@link MuseKeyResponse.subs_usage});
+ * its windows then come from {@link museIdleUsage} instead of reading as
+ * "no usage reported" until the account is used again.
  * @param session - the stored session (its identity token authorizes the mint).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
+ * @param memory - the account's remembered usage (records what the mint reports).
  * @returns the mapped usage snapshot.
  */
 export async function fetchMuseUsage(
   session: MuseSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  memory?: MuseUsageMemory,
 ): Promise<ProviderUsage> {
-  const usage = museUsageFromKey(await mintMuseKey(session.refreshToken, fetchFn, signal))
-  return usage.plan === undefined && session.plan !== undefined ? { ...usage, plan: session.plan } : usage
+  const minted = await mintMuseKey(session.refreshToken, fetchFn, signal)
+  const plan = nonEmpty(minted.subs_tier_name) ?? session.plan
+  if (museReportsWindows(minted.subs_usage)) {
+    memory?.remember(minted.subs_usage)
+    return museUsageFromWire(minted.subs_usage, plan)
+  }
+  if (minted.is_subs_active === false) return museUsageFromWire(undefined, plan)
+  return museIdleUsage(await memory?.recall(), plan)
 }
 
 /** Static reasoning block every Muse chat model advertises. */
@@ -774,12 +854,23 @@ export function museToolCallName(name: string, declared: ReadonlySet<string>): s
   return declared.has(bare) ? bare : name
 }
 
-/** Event tap: rewrite a namespaced builtin call, then run the caller's capture. */
+/**
+ * Event tap: report a subscription-usage frame, rewrite a namespaced builtin
+ * call, then run the caller's capture.
+ */
 function museEventTap(
   capture: (event: ResponsesStreamEvent) => ResponsesStreamEvent,
   declared: ReadonlySet<string>,
+  onSubscriptionUsage?: (usage: MuseSubscriptionUsageWire) => void,
 ): (event: ResponsesStreamEvent) => ResponsesStreamEvent {
   return event => {
+    if (onSubscriptionUsage !== undefined) {
+      const usage = museStreamSubscriptionUsage(event as { type?: unknown; subscription?: unknown })
+      if (usage !== undefined) {
+        // A usage sink must never break the stream it observes.
+        try { onSubscriptionUsage(usage) } catch { /* best effort */ }
+      }
+    }
     const item = event.item
     if (item?.type === 'function_call' && typeof item.name === 'string') {
       const name = museToolCallName(item.name, declared)
@@ -920,6 +1011,11 @@ export interface MuseAdapterOptions {
   continuationRetryMs?: readonly number[]
   /** Clock for the blocked-network recheck window (tests advance it). */
   now?: () => number
+  /**
+   * Receives the subscription usage Meta reports at the start of every
+   * response stream, keyed by the account that sent the request.
+   */
+  onSubscriptionUsage?: (account: string, usage: MuseSubscriptionUsageWire) => void
 }
 
 /** Muse wire adapter: one instance serves the `muse` provider route. */
@@ -1269,7 +1365,11 @@ export class MuseAdapter extends LlmAdapter {
       // request whose chunks carry on the same assistant message.
       const first = newOutcome()
       const declared = new Set((options.tools ?? []).map(tool => tool.name))
-      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, museEventTap(captureInto(first), declared))) {
+      const sink = this.options.onSubscriptionUsage
+      const onUsage = sink === undefined || accountKey === undefined
+        ? undefined
+        : (usage: MuseSubscriptionUsageWire) => { sink(accountKey, usage) }
+      for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, museEventTap(captureInto(first), declared, onUsage))) {
         recordChunk(first, chunk)
         if (chunk.type !== 'usage' && chunk.type !== 'finish') yield chunk
       }
@@ -1277,7 +1377,7 @@ export class MuseAdapter extends LlmAdapter {
       let dropped: MuseStreamOutcome | undefined
       if (this.endedEarly(first, options)) {
         this.options.onWarn?.('muse ended a turn with a short text-only reply; asking the model once whether it meant to carry on')
-        const continued = yield* this.continueAfterAnnouncement({ options, history: messages, first, bodyOf, send, watchdog })
+        const continued = yield* this.continueAfterAnnouncement({ options, history: messages, first, bodyOf, send, watchdog, onUsage })
         if (continued?.kept === true) { dropped = first; kept = continued.outcome } else dropped = continued?.outcome
       }
       const usage = museMergedUsage(kept.usage, dropped?.usage)
@@ -1338,6 +1438,7 @@ export class MuseAdapter extends LlmAdapter {
     bodyOf: (history: readonly TranslatableMessage[]) => () => string
     send: (body: () => string) => Promise<Response>
     watchdog: IdleWatchdog
+    onUsage?: ((usage: MuseSubscriptionUsageWire) => void) | undefined
   }): AsyncGenerator<StreamChunk, { outcome: MuseStreamOutcome; kept: boolean } | undefined> {
     const { first, watchdog } = input
     const body = input.bodyOf([
@@ -1364,7 +1465,7 @@ export class MuseAdapter extends LlmAdapter {
           failure = new Error(`HTTP ${String(response.status)}`)
         } else {
           const declared = new Set((input.options.tools ?? []).map(tool => tool.name))
-          for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, museEventTap(captureInto(second), declared))) {
+          for await (const chunk of streamResponses(response.body, () => { watchdog.pulse() }, museEventTap(captureInto(second), declared, input.onUsage))) {
             recordChunk(second, chunk)
             if (chunk.type === 'usage' || chunk.type === 'finish') continue
             const placed = shiftedChunk(chunk, first.blocks)

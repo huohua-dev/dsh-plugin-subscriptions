@@ -169,3 +169,13 @@ test('snapshotFor: a rate limit with no prior success still throws (nothing to f
   const { tracker } = trackerOf(() => Promise.reject(error))
   await assert.rejects(tracker.snapshotFor('claude', 'a1'), error)
 })
+
+test('record: a pushed snapshot serves the next read without a fetch and keeps the plan on record', async () => {
+  const { tracker, calls } = trackerOf(() => Promise.resolve({ ...OK_USAGE, plan: 'Max' }))
+  await tracker.snapshotFor(MEMBER.provider, MEMBER.account)
+  assert.equal(calls.count, 1)
+  tracker.record(MEMBER.provider, MEMBER.account, { supported: true, windows: [{ kind: 'session', usedPercent: 42 }] })
+  const snapshot = await tracker.snapshotFor(MEMBER.provider, MEMBER.account)
+  assert.equal(calls.count, 1, 'the pushed snapshot is fresh')
+  assert.deepEqual(snapshot, { supported: true, windows: [{ kind: 'session', usedPercent: 42 }], plan: 'Max' })
+})

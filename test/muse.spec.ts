@@ -18,6 +18,9 @@ import {
   MuseAdapter,
   completeMuseLogin,
   fetchMuseModels,
+  fetchMuseUsage,
+  museIdleUsage,
+  museStreamSubscriptionUsage,
   isMusePermanentRefreshError,
   museAnnouncesAction,
   museDeviceFlow,
@@ -38,7 +41,7 @@ import {
   MUSE_BUILTIN_TOOL_NAMESPACE,
   MUSE_BUILTIN_TOOL_NAMES,
 } from '../src/providers/muse-builtin-tools.js'
-import type { MuseReplayResponse } from '../src/providers/muse.js'
+import type { MuseReplayResponse, MuseSubscriptionUsageWire, MuseUsageMemory } from '../src/providers/muse.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { DeviceFlowManager } from '../src/auth/device-flow.js'
 import { accountKeyOf } from '../src/auth/store.js'
@@ -155,6 +158,82 @@ test('museUsageFromKey maps the 5-hour and weekly windows with second-based rese
   })
   const odd = museUsageFromKey({ subs_usage: { window: { used_percent: 1, window_duration_mins: 60 } } })
   assert.equal(odd.windows?.[0]?.kind, 'other', 'a non-5-hour short window is not mislabelled')
+})
+
+/** An in-memory {@link MuseUsageMemory}. */
+function usageMemory(initial?: MuseSubscriptionUsageWire) {
+  let stored = initial
+  const remembered: MuseSubscriptionUsageWire[] = []
+  const memory: MuseUsageMemory = {
+    recall: () => Promise.resolve(stored),
+    remember: (usage) => { stored = usage; remembered.push(usage) },
+  }
+  return { memory, remembered }
+}
+
+test('an idle mint (no subs_usage) reads as an unused 5-hour window plus the remembered weekly lane', async () => {
+  const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: 0, plan: 'Muse Code Power Usage' }
+  const idleMint = { ...MINT, subs_usage: undefined }
+  const future = Math.floor(Date.now() / 1000) + 86_400
+  const { memory } = usageMemory({
+    window: { used_percent: 80, window_duration_mins: 300, resets_at: 1_000 },
+    weekly: { used_percent: 67, resets_at: future },
+  })
+  const usage = await fetchMuseUsage(session, recordingFetch(() => json(idleMint)).fetchFn, undefined, memory)
+  assert.deepEqual(usage, {
+    supported: true,
+    plan: 'Muse Code Everyday Usage',
+    windows: [
+      { kind: 'session', usedPercent: 0 },
+      { kind: 'weekly', usedPercent: 67, resetsAt: future * 1000 },
+    ],
+  })
+  // Nothing remembered yet: the 5-hour lane is still known to be unused.
+  const cold = await fetchMuseUsage(session, recordingFetch(() => json(idleMint)).fetchFn)
+  assert.deepEqual(cold.windows, [{ kind: 'session', usedPercent: 0 }])
+})
+
+test('museIdleUsage zeroes a remembered weekly lane past its reset and keeps a still-running window', () => {
+  const now = 2_000_000_000_000
+  const usage = museIdleUsage({
+    window: { used_percent: 30, window_duration_mins: 300, resets_at: now / 1000 + 60 },
+    weekly: { used_percent: 90, resets_at: now / 1000 - 60 },
+  }, undefined, now)
+  assert.deepEqual(usage.windows, [
+    { kind: 'session', usedPercent: 30, resetsAt: now + 60_000 },
+    { kind: 'weekly', usedPercent: 0 },
+  ])
+})
+
+test('fetchMuseUsage remembers what an active mint reports', async () => {
+  const { memory, remembered } = usageMemory()
+  const session: MuseSession = { accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: 0 }
+  const usage = await fetchMuseUsage(session, recordingFetch(() => json(MINT)).fetchFn, undefined, memory)
+  assert.equal(usage.windows?.length, 2)
+  assert.deepEqual(remembered, [MINT.subs_usage])
+})
+
+test('the subscription usage frame opening a response stream reaches the usage sink', async () => {
+  const subscription = {
+    tier: '1',
+    weekly: { resets_at: 1_793_577_600, used_percent: 67 },
+    window: { resets_at: 1_793_448_894, used_percent: 0, window_duration_mins: 300 },
+  }
+  const reports: { account: string; usage: MuseSubscriptionUsageWire }[] = []
+  const { fetchFn } = recordingFetch(() => sse([{ type: 'response.subscription_usage', subscription }, ...TEXT_EVENTS]))
+  const adapter = new MuseAdapter({
+    models: [{ id: 'muse-spark-1.3' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens({ accessToken: 'LLM|k', refreshToken: 'dca:i', expiresAt: Date.now() + 3_600_000 }),
+    discovery: false,
+    fetchFn,
+    onSubscriptionUsage: (account, usage) => { reports.push({ account, usage }) },
+  })
+  const chunks = await collect(adapter.stream({ provider: 'muse', model: 'muse-spark-1.3', messages: [USER] } as unknown as GenerateOptions))
+  assert.equal(chunks.at(-1)?.type, 'finish')
+  assert.deepEqual(reports, [{ account: 'acct', usage: subscription }])
+  assert.equal(museStreamSubscriptionUsage({ type: 'response.subscription_usage', subscription: {} }), undefined)
+  assert.equal(museStreamSubscriptionUsage({ type: 'response.created', subscription }), undefined)
 })
 
 /** One live `/muse-code/models` entry (shape as served). */

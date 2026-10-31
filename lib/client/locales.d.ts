@@ -97,6 +97,7 @@ export declare const en: {
     usageRefresh: string;
     usageLoading: string;
     usageEmpty: string;
+    usageEmptyMuse: string;
     usageNoVisibleModels: string;
     usageError: string;
     usageSession: string;
@@ -298,6 +299,7 @@ export declare const zh: {
     usageRefresh: string;
     usageLoading: string;
     usageEmpty: string;
+    usageEmptyMuse: string;
     usageNoVisibleModels: string;
     usageError: string;
     usageSession: string;

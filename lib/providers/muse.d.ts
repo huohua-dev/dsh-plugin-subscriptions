@@ -122,14 +122,6 @@ export interface MuseKeyResponse {
     subs_usage?: MuseSubscriptionUsageWire;
 }
 /**
- * Per-account memory of the last usage Meta disclosed (mint or stream), so an
- * idle account's weekly lane stays known while the mint is silent about it.
- */
-export interface MuseUsageMemory {
-    recall(): Promise<MuseSubscriptionUsageWire | undefined>;
-    remember(usage: MuseSubscriptionUsageWire): void;
-}
-/**
  * Exchange the Meta identity token for the Model API key. A 401/403 means
  * the identity is revoked or expired — permanent, re-login required.
  * @param identityToken - the OIDC identity token from the device flow.
@@ -174,16 +166,6 @@ export declare function museUsageFromKey(minted: MuseKeyResponse): ProviderUsage
  */
 export declare function museUsageFromWire(wire: MuseSubscriptionUsageWire | undefined, plan?: string): ProviderUsage;
 /**
- * The usage of an account whose mint reported no windows: no 5-hour window is
- * running, so that lane is unused (0%). The weekly lane cannot have moved since
- * Meta last reported it — any request would have opened a 5-hour window — so
- * the remembered value stands until its reset, and reads 0% after it.
- * @param remembered - the last usage Meta disclosed for the account, if any.
- * @param plan - the tier name to show, when known.
- * @param now - clock (tests pin it).
- */
-export declare function museIdleUsage(remembered: MuseSubscriptionUsageWire | undefined, plan?: string, now?: number): ProviderUsage;
-/**
  * Read the `subscription` of a `response.subscription_usage` stream frame.
  * @returns the reported usage, or undefined for any other event or a malformed frame.
  */
@@ -194,15 +176,31 @@ export declare function museStreamSubscriptionUsage(event: {
 /**
  * Fetch the subscription usage through the (idempotent) key mint. An idle
  * account mints without any usage (see {@link MuseKeyResponse.subs_usage});
- * its windows then come from {@link museIdleUsage} instead of reading as
- * "no usage reported" until the account is used again.
+ * the manual Refresh then activates it with {@link activateMuseUsage}.
  * @param session - the stored session (its identity token authorizes the mint).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
- * @param memory - the account's remembered usage (records what the mint reports).
  * @returns the mapped usage snapshot.
  */
-export declare function fetchMuseUsage(session: MuseSession, fetchFn?: FetchFn, signal?: AbortSignal, memory?: MuseUsageMemory): Promise<ProviderUsage>;
+export declare function fetchMuseUsage(session: MuseSession, fetchFn?: FetchFn, signal?: AbortSignal): Promise<ProviderUsage>;
+/** The prompt that opens an idle account's usage window: as small as a request gets. */
+export declare const MUSE_USAGE_ACTIVATION_PROMPT = "1+1=?";
+/**
+ * Open an idle account's 5-hour window with the smallest possible request
+ * ({@link MUSE_USAGE_ACTIVATION_PROMPT}, minimal effort, a 16-token cap) and
+ * read the usage Meta reports in the frame that opens the stream. The stream
+ * is cancelled as soon as that frame arrives, so the answer is never
+ * generated in full; the window is already running at that point (live-verified
+ * 2026-10-31: the mint reported usage right after a request cancelled there).
+ * @param apiKey - the account's Model API key.
+ * @param model - a chat model the account may use.
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation.
+ * @param rekey - re-mints the key after a 401 (one retry).
+ * @returns the reported usage, or undefined when the stream carried none.
+ * @throws LlmError when Meta refuses the request.
+ */
+export declare function activateMuseUsage(apiKey: string, model: string, fetchFn?: FetchFn, signal?: AbortSignal, rekey?: () => Promise<string>): Promise<MuseSubscriptionUsageWire | undefined>;
 /** Display name for a model id the catalog does not name (`muse-spark-1.3-contributor` → `Muse Spark 1.3 Contributor`). */
 export declare function museModelName(id: string): string;
 /**
@@ -454,6 +452,15 @@ export declare class MuseAdapter extends LlmAdapter {
      * reached, and a stored or built-in catalog would say nothing.
      */
     probeOwnModels(provider: string, account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
+    /**
+     * Open an idle account's usage window with one minimal request (see
+     * {@link activateMuseUsage}), on the first model the account lists. The
+     * report also reaches {@link MuseAdapterOptions.onSubscriptionUsage}.
+     * @param account - the canonical account key.
+     * @param signal - caller cancellation.
+     * @returns the reported usage, or undefined when Meta reported none.
+     */
+    activateUsage(account: string, signal?: AbortSignal): Promise<MuseSubscriptionUsageWire | undefined>;
     private discovered;
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */

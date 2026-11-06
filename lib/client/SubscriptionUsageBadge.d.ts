@@ -39,6 +39,11 @@ export interface ProviderUsageDisplay {
     /** Default account first, then the rest in the `status` endpoint's order. */
     accounts: AccountUsageDisplay[];
 }
+/** Display-only warning; does not infer model eligibility or uncached accounts. */
+export declare function CodexExhaustionNotice({ display, translate }: {
+    display: ProviderUsageDisplay;
+    translate: (key: SubscriptionsKey) => string;
+}): import("react").JSX.Element | null;
 /** The account the collapsed pill reads: the default one, else the first listed. */
 export declare function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay;
 /**
@@ -83,7 +88,7 @@ type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => st
  * available.
  */
 export declare function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps): import("react").JSX.Element;
-/** Preview each account independently; all remaining quotas stay accessible. */
+/** Preview each account independently; remaining visible quotas stay accessible. */
 export declare function AccountWindows({ windows, model, provider, translate }: {
     windows: readonly UsageWindow[];
     model: string | undefined;

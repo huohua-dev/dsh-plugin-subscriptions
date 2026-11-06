@@ -13,14 +13,18 @@
 import type { ProviderUsage } from './common.js';
 import type { ProviderId } from '../auth/store.js';
 import type { ConcretePoolMember } from './pool-family.js';
-/** A member is taken out of rotation once any window crosses this fill level. */
+/** Near-full members are tried only after members below this fill level. */
 export declare const QUOTA_FULL_PERCENT = 95;
+/** Exhausted subscription windows must not silently spill over into paid credits. */
+export declare const QUOTA_EXHAUSTED_PERCENT = 100;
 /** How long a usage snapshot is trusted before a background refresh. */
 export declare const USAGE_TTL_MS: number;
 /** The scheduling view of one member's quota. */
 export interface MemberQuota {
-    /** False when a window is effectively full or the login is gone. */
+    /** False when a window is near-full or the login is gone. */
     available: boolean;
+    /** A known exhausted window: exclude even if the upstream would accept paid credits. */
+    exhausted?: true;
     /** Required burn rate (fraction of window per ms); 0 when unknown. */
     urgency: number;
     /** Epoch ms of the snapshot this was computed from; 0 when none. */
@@ -42,21 +46,20 @@ export declare class PoolUsageTracker {
     constructor(fetcherFor: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined, ttlMs?: number);
     /**
      * The quota view of one member. A cold cache awaits the first fetch; a
-     * stale one answers immediately while the refresh serves the NEXT call
-     * (member selection must never block on the network mid-conversation). A
-     * failure still cooling down degrades immediately with no network call.
+     * stale non-exhausted snapshot answers immediately while refreshing in the
+     * background. Exhausted snapshots await their expired-cache refresh so a
+     * reset can restore routing on this call. A live failure cooldown never
+     * triggers another fetch.
      *
-     * Deliberately does NOT fall back to `lastSnapshot` the way
-     * {@link snapshotFor} does: scoring routing decisions off data that is
-     * known to be stale-and-unrefreshable risks steering traffic by a urgency
-     * number the endpoint itself is no longer vouching for, whereas
-     * `snapshotFor`'s stale-display concern (the Settings page, the composer
-     * badge) has no such downside — showing an old percentage beats showing
-     * nothing.
+     * Failures discard stale urgency but preserve known exhaustion: an outage
+     * must not turn a blocked subscription into permission to spend credits.
+     * Only a successful usage lookup (or explicit invalidation) clears it.
      * @param member - the pool member to score (account resolved).
      * @returns availability plus the urgency score.
      */
     quotaFor(member: ConcretePoolMember): Promise<MemberQuota>;
+    /** Keep a known credit-spending risk blocked through usage-endpoint failures. */
+    private failedQuota;
     /**
      * Same cache as {@link quotaFor}, for direct display (the Settings page):
      * the raw snapshot, or the original fetch error, instead of a routing
@@ -76,6 +79,8 @@ export declare class PoolUsageTracker {
      * without a plan keeps the plan already on record.
      */
     record(provider: ProviderId, account: string, snapshot: ProviderUsage): void;
+    /** Recheck after an inference quota failure without erasing another model lane's exhaustion. */
+    expire(provider: ProviderId, account: string): void;
     /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
     invalidate(provider: ProviderId, account?: string): void;
     /**

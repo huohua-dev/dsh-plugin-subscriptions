@@ -91,12 +91,11 @@ export declare class PoolAdapter extends LlmAdapter {
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     private streamMembers;
     /**
-     * Order the candidates for one request. Health filters both strategies;
-     * `quota_aware` then ranks by urgency (members without telemetry, e.g.
-     * copilot, score zero and sink to the bottom of their class), while
-     * quota-exhausted members stay as a last-resort tail in pool order. The
-     * sticky member keeps its lead unless a challenger out-scores it by
-     * `switchMargin`.
+     * Health and known quota exhaustion filter BOTH strategies: >=100% must
+     * never silently spend paid credits. `quota_aware` ranks healthy members
+     * by urgency, then tries near-full (95–<100%) members by urgency too.
+     * Members without telemetry score zero. Stickiness cannot retain an
+     * exhausted member; within the preferred class it uses `switchMargin`.
      */
     private select;
     /** Pin the serving member to the session (with bounded memory). */

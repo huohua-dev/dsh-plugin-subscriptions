@@ -157,6 +157,7 @@ export declare const en: {
     usageBadgeDisplayHidden: string;
     usageBadgeDisplayHint: string;
     usageBadgeDisplaySaveFailed: string;
+    usageBadgeAllCodexExhausted: string;
     usageBadgeCurrent: string;
     usageBadgeModelCount: string;
     usageBadgeModelUnavailable: string;
@@ -359,6 +360,7 @@ export declare const zh: {
     usageBadgeDisplayHidden: string;
     usageBadgeDisplayHint: string;
     usageBadgeDisplaySaveFailed: string;
+    usageBadgeAllCodexExhausted: string;
     usageBadgeCurrent: string;
     usageBadgeModelCount: string;
     usageBadgeModelUnavailable: string;

@@ -190,6 +190,57 @@ test('quotaFor: exhaustion applies only to the requested model, even after a fet
   assert.equal((await tracker.quotaFor({ ...MEMBER, model: 'claude-sonnet-5' })).exhausted, undefined)
 })
 
+test('quotaFor: an exact model-id scope applies only to that id, not to a longer id sharing the prefix', async () => {
+  const member = { provider: 'antigravity' as const, account: 'a1', model: 'gemini-3.1-pro' }
+  const tracker = new PoolUsageTracker(
+    (provider: ProviderId, account: string) =>
+      provider === member.provider && account === member.account
+        ? async () => ({ supported: true, windows: [
+          { kind: 'weekly', scope: 'gemini-3.1-pro', scopeExact: true, usedPercent: 100 },
+        ] })
+        : undefined,
+  )
+  assert.equal((await tracker.quotaFor(member)).exhausted, true, 'the scoped model is exhausted')
+  assert.equal(
+    (await tracker.quotaFor({ ...member, model: 'gemini-3.1-pro-high' })).exhausted,
+    undefined,
+    'a longer id sharing the prefix keeps its own quota',
+  )
+  assert.equal(
+    (await tracker.quotaFor({ ...member, model: 'gemini-30-pro' })).exhausted,
+    undefined,
+    'an unrelated id is unaffected',
+  )
+  assert.equal(
+    (await tracker.quotaFor({ ...member, model: 'gemini-3' })).exhausted,
+    undefined,
+    'a shorter id that prefixes the scope is unaffected too',
+  )
+})
+
+test('quotaFor: a family scope still applies to every model in that family', async () => {
+  const member = { provider: 'claude' as const, account: 'a1', model: 'claude-opus-5' }
+  const tracker = new PoolUsageTracker(
+    (provider: ProviderId, account: string) =>
+      provider === member.provider && account === member.account
+        ? async () => ({ supported: true, windows: [
+          { kind: 'weekly', scope: 'opus', usedPercent: 100 },
+        ] })
+        : undefined,
+  )
+  assert.equal((await tracker.quotaFor(member)).exhausted, true)
+  assert.equal(
+    (await tracker.quotaFor({ ...member, model: 'claude-opus-4-5' })).exhausted,
+    true,
+    'the family scope covers every model in the family',
+  )
+  assert.equal(
+    (await tracker.quotaFor({ ...member, model: 'claude-sonnet-5' })).exhausted,
+    undefined,
+    'another family is unaffected',
+  )
+})
+
 test('quotaFor: exhausted snapshot awaits expired refresh and restores routing on the same call', async () => {
   let finish: ((usage: ProviderUsage) => void) | undefined
   let reads = 0

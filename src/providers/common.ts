@@ -512,6 +512,13 @@ export interface UsageWindow {
   kind: 'session' | 'weekly' | 'other'
   /** Model scope for model-specific windows (e.g. `Opus`), when the provider names one. */
   scope?: string
+  /**
+   * Whether `scope` names one exact model id rather than a model family.
+   * Antigravity scopes a window by the exact id it belongs to; Claude names a
+   * family (`Opus`). An exact scope must match the model id as a whole — the
+   * quota of `gemini-3` says nothing about `gemini-3.1-pro`.
+   */
+  scopeExact?: boolean
   /** Percent of the window already consumed (0–100). */
   usedPercent: number
   /** Epoch milliseconds at which the window resets, when the provider discloses it. */

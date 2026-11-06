@@ -291,11 +291,16 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
 /**
  * Whether a window constrains this model: unscoped windows always do; a
  * model-scoped window (Claude's Opus/Sonnet lanes) applies when its scope
- * names the model family.
+ * names the model family. A scope that is an exact model id (Antigravity's
+ * per-model quotas) matches that id as a whole — a prefix would let the
+ * quota of `gemini-3` claim `gemini-3.1-pro` and `gemini-30-pro` too.
  */
 function windowApplies(window: UsageWindow, model: string): boolean {
   if (window.scope === undefined) return true
-  return model.toLowerCase().includes(window.scope.toLowerCase())
+  const scope = window.scope.toLowerCase()
+  const candidate = model.toLowerCase()
+  if (window.scopeExact === true) return candidate === scope
+  return candidate.includes(scope)
 }
 
 /** The required burn rate of one window (fraction per ms). */

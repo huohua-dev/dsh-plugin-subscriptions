@@ -63,6 +63,41 @@ function drain<T>(translator: { push(event: T): StreamChunk[] }, events: T[]): S
   return events.flatMap(event => translator.push(event))
 }
 
+test('Anthropic foreign tool IDs are legal, collision-free and paired across all result forms', () => {
+  const original = ['a.b', 'a_b', 'a:b', 'a|b', '', '工具🙂', '\ud800', '\ud801', 'toolu_native-ok']
+  const history = (ids: string[]) => [
+    message('assistant', ids.map(id => toolCall(id, 'bash', '{}'))),
+    message('user', ids.map(id => toolResult(id, 'result'))),
+  ]
+  const first = toAnthropicMessages(history(original))
+  const mapped = first[0].content.map(block => String(block.id))
+  assert.equal(new Set(mapped).size, original.length)
+  for (const id of mapped) { assert.match(id, /^[a-zA-Z0-9_-]+$/); assert.ok(id.length <= 64) }
+  assert.equal(mapped[1], 'a_b')
+  assert.equal(mapped.at(-1), 'toolu_native-ok')
+  assert.deepEqual(first[1].content.map(block => block.tool_use_id), mapped)
+  const again = toAnthropicMessages(history([...original, 'ordinary_new_call']))
+  assert.deepEqual(again[0].content.slice(0, original.length).map(block => block.id), mapped)
+  // A later legal ID may exactly equal an earlier generated candidate. Preserve
+  // the legal ID; remap the foreign ID consistently throughout this request.
+  const collision = mapped[0]
+  const second = toAnthropicMessages(history([...original, collision, `${collision}_1`]))
+  const secondIds = second[0].content.map(block => block.id)
+  assert.equal(new Set(secondIds).size, original.length + 2)
+  assert.equal(secondIds.at(-2), collision)
+  assert.equal(secondIds.at(-1), `${collision}_1`)
+  assert.deepEqual(second[1].content.map(block => block.tool_use_id), secondIds)
+  assert.deepEqual(toAnthropicMessages(history([...original, collision, `${collision}_1`])), second)
+  for (const field of ['toolCallId', 'tool_call_id', 'source'] as const) {
+    const result = { ...message('tool', [{ type: 'text', text: 'ok' }]),
+      [field]: field === 'source' ? { kind: 'tool', callId: ToolCallId('a.b') } : 'a.b' } as Message
+    const wire = toAnthropicMessages([message('assistant', [toolCall('a.b', 'bash', '{}')]), result])
+    assert.equal(wire[0].content[0].id, wire[1].content[0].tool_use_id)
+  }
+  const repaired = reconcileAnthropicToolPairs(toAnthropicMessages([message('assistant', [toolCall('a.b', 'bash', '{}')])]))
+  assert.equal(repaired[0].content[0].id, repaired[1].content[0].tool_use_id)
+})
+
 test('toResponsesInput: text, tool call, and tool result round trip', () => {
   const { instructions, input } = toResponsesInput([
     message('user', [{ type: 'text', text: 'list files' }]),

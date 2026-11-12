@@ -236,6 +236,41 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
 }
 
 /**
+ * Reserve every already-valid ID before allocating replacements. A hash alone
+ * can collide with a legal historical ID (or another hash); the request-local
+ * registry disambiguates both, while a shared map keeps calls/results paired.
+ * Sorting makes allocation independent of message/result order. Durable history
+ * and native Claude IDs are never changed.
+ */
+function anthropicToolIds(messages: readonly TranslatableMessage[]): Map<string, string> {
+  const ids = new Set<string>()
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const id = message.toolCallId ?? message.tool_call_id
+        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      if (id !== undefined) ids.add(String(id))
+    }
+    for (const block of message.content) {
+      if (block.type === 'tool-call') ids.add(String(block.id))
+      if (block.type === 'tool-result') ids.add(String(block.toolCallId))
+    }
+  }
+  const mapped = new Map<string, string>()
+  const reserved = new Set([...ids].filter(id => /^[a-zA-Z0-9_-]+$/.test(id)))
+  for (const id of reserved) mapped.set(id, id)
+  for (const id of [...ids].filter(id => !reserved.has(id)).sort()) {
+    // UTF-16 keeps even distinct lone-surrogate JS strings distinct pre-hash.
+    const base = `tool_${createHash('sha256').update(id, 'utf16le').digest('hex').slice(0, 48)}`
+    let candidate = base
+    let suffix = 0
+    while (reserved.has(candidate)) candidate = `${base}_${++suffix}`
+    reserved.add(candidate)
+    mapped.set(id, candidate)
+  }
+  return mapped
+}
+
+/**
  * Convert harness messages into Anthropic messages. Consecutive same-role
  * messages merge into one message with multiple content blocks; tool results
  * arrive as user messages with `tool_result` blocks, which a merged user
@@ -258,6 +293,7 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
 export function toAnthropicMessages(messages: readonly TranslatableMessage[], replay?: ClaudeReplayScope): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
   const start = conversationStart(messages)
+  const toolIds = anthropicToolIds(messages)
   for (const [index, message] of messages.entries()) {
     // A leading system message is an opening instruction; toAnthropicSystem
     // owns those. A later one rides here so the cached prefix ahead of it
@@ -271,7 +307,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
       if (id === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
       blocks.push({
         type: 'tool_result',
-        tool_use_id: id,
+        tool_use_id: toolIds.get(String(id))!,
         content: toolResultContent({ type: 'tool-result', toolCallId: ToolCallId(id), content: message.content }),
         ...message.isError === true ? { is_error: true } : {},
       })
@@ -309,7 +345,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
           blocks.push(role === 'assistant'
             ? {
                 type: 'tool_use',
-                id: String(block.id),
+                id: toolIds.get(String(block.id))!,
                 name: block.name,
                 input: parseToolInput(block.arguments),
               }
@@ -318,7 +354,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
         case 'tool-result':
           blocks.push({
             type: 'tool_result',
-            tool_use_id: String(block.toolCallId),
+            tool_use_id: toolIds.get(String(block.toolCallId))!,
             content: toolResultContent(block),
             ...block.isError === true ? { is_error: true } : {},
           })

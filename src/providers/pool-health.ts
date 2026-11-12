@@ -6,7 +6,8 @@
  * The failure classifier maps the adapters' stable `LlmError` codes (see
  * `httpLlmError`/`mapFetchFailure` in `common.ts`) to one of three actions:
  * switch to another member with a cooldown, switch without recording a
- * cooldown (transport blips say nothing about the account), or rethrow
+ * cooldown (transport blips and empty completions say nothing about the
+ * account), or rethrow
  * (the request itself is at fault and another account would fail alike).
  */
 
@@ -84,6 +85,10 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
     case 'MISSING_CREDENTIAL':
       return { action: 'switch', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
     case 'SERVER':
+      // Only an explicit Codex overload hint establishes a member-local wait.
+      if (provider === 'codex' && retryAfterMs(error) !== undefined) {
+        return { action: 'switch', cooldownMs: retryAfterMs(error)!, reason: error.code, scope: 'member' }
+      }
     case 'TIMEOUT':
     case 'EMPTY_RESPONSE':
     case 'TRANSPORT':

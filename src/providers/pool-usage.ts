@@ -10,6 +10,7 @@
  * `quota_aware` strategy therefore prefers the highest-urgency member, which
  * over time converges on every window hitting zero right at its reset.
  */
+import { antigravityModelId, antigravityQuotaApplies } from '../antigravity-model-id.js'
 
 import { isMissingOrInvalidCredential, OAuthEndpointError } from './common.js'
 import type { ProviderUsage, UsageWindow } from './common.js'
@@ -36,7 +37,7 @@ export interface MemberQuota {
   available: boolean
   /** A known exhausted window: exclude even if the upstream would accept paid credits. */
   exhausted?: true
-  /** Required burn rate (fraction of window per ms); 0 when unknown. */
+  /** Burn rate in strategy-specific units; 0 when unmeasured. */
   urgency: number
   /** Epoch ms of the snapshot this was computed from; 0 when none. */
   fetchedAt: number
@@ -45,6 +46,7 @@ export interface MemberQuota {
 /** A successful snapshot, cached until `ttlMs` (or the entry's own `cooldownMs`) elapses. */
 interface SnapshotEntry {
   snapshot: ProviderUsage
+  fetchedAt?: number
   error?: undefined
   at: number
   cooldownMs?: undefined
@@ -71,6 +73,7 @@ interface FailureEntry {
   cooldownMs: number
   /** The last successful snapshot before this failure, when one exists. */
   lastSnapshot?: ProviderUsage
+  lastSnapshotAt?: number
 }
 
 type CacheEntry = SnapshotEntry | FailureEntry
@@ -105,7 +108,7 @@ export class PoolUsageTracker {
    * @param member - the pool member to score (account resolved).
    * @returns availability plus the urgency score.
    */
-  async quotaFor(member: ConcretePoolMember): Promise<MemberQuota> {
+  async quotaFor(member: ConcretePoolMember, normalized = false): Promise<MemberQuota> {
     const key = `${member.provider}/${member.account}`
     const fetcher = this.fetcherFor(member.provider, member.account)
     if (fetcher === undefined) return { available: true, urgency: 0, fetchedAt: 0 }
@@ -113,7 +116,7 @@ export class PoolUsageTracker {
     if (entry !== undefined) {
       const fresh = Date.now() - entry.at < (entry.cooldownMs ?? this.ttlMs)
       if (entry.snapshot !== undefined) {
-        const quota = this.score(member, entry)
+        const quota = this.score(member, entry, normalized)
         if (fresh) return quota
         if (!quota.exhausted && entry.at !== Number.NEGATIVE_INFINITY) {
           void this.refresh(key, fetcher).catch(() => undefined)
@@ -127,7 +130,7 @@ export class PoolUsageTracker {
     }
     try {
       const snapshot = await this.refresh(key, fetcher)
-      return this.score(member, { snapshot, at: Date.now() })
+      return this.score(member, { snapshot, at: Date.now() }, normalized)
     } catch (error: unknown) {
       return this.failedQuota(member, error, entry?.snapshot ?? entry?.lastSnapshot)
     }
@@ -193,7 +196,23 @@ export class PoolUsageTracker {
     const key = `${provider}/${account}`
     const prior = this.entries.get(key)
     const plan = snapshot.plan ?? (prior?.snapshot ?? prior?.lastSnapshot)?.plan
-    this.entries.set(key, { snapshot: plan === undefined ? snapshot : { ...snapshot, plan }, at: Date.now() })
+    const fetchedAt = Date.now()
+    this.entries.set(key, { snapshot: plan === undefined ? snapshot : { ...snapshot, plan }, at: fetchedAt, fetchedAt })
+  }
+
+  /** Decorate a copy for UI consumers; raw snapshots and routing stay unchanged. */
+  async displaySnapshotFor(provider: ProviderId, account: string, force = false): Promise<ProviderUsage> {
+    const snapshot = await this.snapshotFor(provider, account, force)
+    const entry = this.entries.get(`${provider}/${account}`)
+    if (!entry) return snapshot
+    const fetchedAt = entry.snapshot !== undefined ? (entry.fetchedAt ?? entry.at) : entry.lastSnapshotAt
+    return {
+      ...snapshot,
+      ...(fetchedAt === undefined || !Number.isFinite(fetchedAt) ? {} : { fetchedAt, staleAt: fetchedAt + this.ttlMs }),
+      stale: entry.snapshot === undefined || Date.now() - entry.at >= this.ttlMs,
+      refreshFailed: entry.snapshot === undefined,
+      ...(entry.snapshot === undefined ? { retryAt: entry.at + entry.cooldownMs } : {}),
+    }
   }
 
   /** Recheck after an inference quota failure without erasing another model lane's exhaustion. */
@@ -233,9 +252,11 @@ export class PoolUsageTracker {
       // consecutive failure, even though nothing newer ever replaced it.
       const prior = this.entries.get(key)
       const lastSnapshot = prior?.snapshot ?? prior?.lastSnapshot
+      const lastSnapshotAt = prior?.snapshot !== undefined ? (prior.fetchedAt ?? prior.at) : prior?.lastSnapshotAt
       pending = fetcher().then(
         (snapshot) => {
-          this.entries.set(key, { snapshot, at: Date.now() })
+          const fetchedAt = Date.now()
+          this.entries.set(key, { snapshot, at: fetchedAt, fetchedAt })
           return snapshot
         },
         (error: unknown) => {
@@ -245,6 +266,7 @@ export class PoolUsageTracker {
               at: Date.now(),
               cooldownMs: cooldownFor(error, this.ttlMs),
               ...lastSnapshot === undefined ? {} : { lastSnapshot },
+              ...lastSnapshotAt === undefined ? {} : { lastSnapshotAt },
             })
           }
           throw error
@@ -258,13 +280,13 @@ export class PoolUsageTracker {
   }
 
   /** Score one member against a snapshot's windows. */
-  private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
-    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model))
+  private score(member: ConcretePoolMember, entry: SnapshotEntry, normalized = false): MemberQuota {
+    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model, member.provider))
     let available = true
     let urgency = 0
     for (const window of windows) {
       if (window.usedPercent >= QUOTA_FULL_PERCENT) available = false
-      urgency = Math.max(urgency, windowUrgency(window))
+      urgency = Math.max(urgency, normalized ? normalizedWindowUrgency(window, Date.now()) : windowUrgency(window))
     }
     const exhausted = windows.some(window => window.usedPercent >= QUOTA_EXHAUSTED_PERCENT)
     return { available, urgency, fetchedAt: entry.at, ...exhausted ? { exhausted: true as const } : {} }
@@ -295,12 +317,28 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
  * per-model quotas) matches that id as a whole — a prefix would let the
  * quota of `gemini-3` claim `gemini-3.1-pro` and `gemini-30-pro` too.
  */
-function windowApplies(window: UsageWindow, model: string): boolean {
+function windowApplies(window: UsageWindow, model: string, provider: ProviderId): boolean {
   if (window.scope === undefined) return true
   const scope = window.scope.toLowerCase()
   const candidate = model.toLowerCase()
-  if (window.scopeExact === true) return candidate === scope
+  if (window.scopeExact === true) {
+    // An exact concrete variant also constrains its synthetic selector row,
+    // never a sibling variant or a longer wire ID (fork eab2807).
+    return candidate === scope || provider === 'antigravity'
+      && antigravityModelId(scope) !== scope && candidate === antigravityModelId(scope)
+  }
+  if (provider === 'antigravity') return antigravityQuotaApplies(scope, candidate)
   return candidate.includes(scope)
+}
+
+/** Dimensionless urgency for the opt-in strategy. Missing timing adds no reset bonus. */
+export function normalizedWindowUrgency(window: UsageWindow, now: number): number {
+  const remaining = Math.max(0, Math.min(1, 1 - window.usedPercent / 100))
+  const { durationMs, resetsAt } = window
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs <= 0
+    || resetsAt === undefined || !Number.isFinite(resetsAt)) return remaining
+  const timeFraction = Math.min(1, Math.max(0.001, (resetsAt - now) / durationMs))
+  return remaining / timeFraction
 }
 
 /** The required burn rate of one window (fraction per ms). */

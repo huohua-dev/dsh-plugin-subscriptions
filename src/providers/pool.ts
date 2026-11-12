@@ -31,7 +31,7 @@ import { withAbortSignal } from './common.js'
 import { streamAccountWithReplay } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
-export type PoolStrategy = 'priority' | 'quota_aware'
+export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized'
 
 export interface PoolAdapterOptions {
   /** The live subscription adapters, by provider route. */
@@ -320,7 +320,6 @@ export class PoolAdapter extends LlmAdapter {
           : new LlmError(describeFailure(error), 'TRANSPORT', { cause: error }))
         last = member
         continue
-        continue
       }
       this.remember(options.model, options.sessionId, member)
       // Past the first content chunk there is no clean attempt boundary: whatever
@@ -364,7 +363,7 @@ export class PoolAdapter extends LlmAdapter {
       && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
     if (usable.length === 0) return []
     const quotas = new Map<ConcretePoolMember, MemberQuota>(
-      await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member)] as const)),
+      await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member, this.options.strategy === 'quota_normalized')] as const)),
     )
     const eligible = usable.filter(member => !quotas.get(member)?.exhausted)
     if (eligible.length === 0) {

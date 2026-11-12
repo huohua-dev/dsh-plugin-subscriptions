@@ -74,7 +74,7 @@ export interface Config {
         /** Enable account pooling (default true; needs ≥2 accounts of one provider). */
         enabled?: boolean;
         /** Member selection: plain priority failover, or quota-aware urgency scheduling. */
-        strategy?: 'priority' | 'quota_aware';
+        strategy?: 'priority' | 'quota_aware' | 'quota_normalized';
         /** A challenger must out-score the sticky member by this factor to take over (default 2). */
         switchMargin?: number;
         /** Auto-pool every catalog model across a provider's logged-in accounts (default true). */

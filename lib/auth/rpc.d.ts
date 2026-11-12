@@ -49,8 +49,8 @@ export interface SpeedState {
 export interface SpeedController {
     /** Pass the current Codex model to resolve a subagent's default speed. */
     speed(sessionId: string, model?: string): Promise<SpeedState>;
-    /** Set one session's speed tier. */
-    setSpeed(sessionId: string, tier: SpeedTier): Promise<void>;
+    /** Set the session override and remember it for this model across restarts when supplied. */
+    setSpeed(sessionId: string, tier: SpeedTier, model?: string): Promise<void>;
 }
 /** One logged-in account, as rendered by the Settings page. */
 export interface AccountStatus {

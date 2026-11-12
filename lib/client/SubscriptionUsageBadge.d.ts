@@ -1,9 +1,10 @@
 import type { ComponentType } from 'react';
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client';
-import type { SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js';
+import type { ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js';
 import type { ModelDirectoriesLike } from './SpeedSelect.js';
 import type { SubscriptionsKey } from './locales.js';
+import { type QuotaDisplayMode } from './usage-badge-preferences.js';
 /** DSH renamed the data icon in 0.1.7; retain older supported hosts too. */
 export declare function usageBadgeIcon(icons: {
     IconDataOutlineRegular?: ComponentType;
@@ -28,18 +29,19 @@ export interface AccountUsageDisplay {
     /** Display handle (email / login), when the provider reports one. */
     account?: string;
     plan?: string;
-    /** The account direct routes serve; the collapsed pill reads this one. */
+    /** Configured default, not evidence of which account served a request. */
     isDefault: boolean;
     windows: UsageWindow[];
+    usage?: ProviderUsage;
+    loadFailed?: boolean;
 }
-/** One provider's usage snapshot: every logged-in account that reports windows. */
+/** Every signed-in account, including those with unknown quota. */
 export interface ProviderUsageDisplay {
     provider: SubscriptionProvider;
     name: string;
     /** Default account first, then the rest in the `status` endpoint's order. */
     accounts: AccountUsageDisplay[];
 }
-/** Display-only warning; does not infer model eligibility or uncached accounts. */
 export declare function CodexExhaustionNotice({ display, translate }: {
     display: ProviderUsageDisplay;
     translate: (key: SubscriptionsKey) => string;
@@ -61,7 +63,7 @@ export declare function createCurrentModelReader(models: () => ModelDirectoriesL
  */
 export declare function windowLabel(w: UsageWindow): string;
 /** Keep model quotas separate: matching percentages do not imply a shared pool. */
-export declare function prioritizeWindows(windows: readonly UsageWindow[], model?: string): UsageWindow[];
+export declare function prioritizeWindows(windows: readonly UsageWindow[], model?: string, provider?: SubscriptionProvider): UsageWindow[];
 /** Small previews keep a live model catalog from taking over the dialog. */
 export declare const WINDOW_PREVIEW_LIMIT = 4;
 export declare function previewWindows(windows: readonly UsageWindow[], model?: string, provider?: SubscriptionProvider): {
@@ -69,7 +71,7 @@ export declare function previewWindows(windows: readonly UsageWindow[], model?: 
     hidden: UsageWindow[];
 };
 /** Bounded readout; Antigravity quotas belong to individual models, not the account. */
-export declare function compactSegment(d: ProviderUsageDisplay, model?: string, t?: Translate): string;
+export declare function compactSegment(d: ProviderUsageDisplay, model?: string, t?: Translate, mode?: QuotaDisplayMode): string;
 type ModelSelection = {
     provider: string;
     model: string;
@@ -84,15 +86,15 @@ type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => st
 /**
  * The composer subscription-usage badge: a pill reading e.g.
  * `Codex 6d 1h 25%` for the current model's provider, opening a dialog with
- * every provider's accounts and their windows. Returns null when no data is
- * available.
+ * every provider's accounts and their windows, including unavailable telemetry.
  */
 export declare function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps): import("react").JSX.Element;
 /** Preview each account independently; remaining visible quotas stay accessible. */
-export declare function AccountWindows({ windows, model, provider, translate }: {
+export declare function AccountWindows({ windows, model, provider, translate, mode }: {
     windows: readonly UsageWindow[];
     model: string | undefined;
     provider?: SubscriptionProvider;
     translate: Translate;
+    mode?: QuotaDisplayMode | undefined;
 }): import("react").JSX.Element;
 export {};

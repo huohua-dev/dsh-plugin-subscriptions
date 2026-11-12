@@ -6,7 +6,8 @@
  * The failure classifier maps the adapters' stable `LlmError` codes (see
  * `httpLlmError`/`mapFetchFailure` in `common.ts`) to one of three actions:
  * switch to another member with a cooldown, switch without recording a
- * cooldown (transport blips say nothing about the account), or rethrow
+ * cooldown (transport blips and empty completions say nothing about the
+ * account), or rethrow
  * (the request itself is at fault and another account would fail alike).
  */
 import { LlmError } from '@deepseek-ai/dsh-llm';

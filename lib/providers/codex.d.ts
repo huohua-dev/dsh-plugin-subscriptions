@@ -12,7 +12,7 @@ import type { PoolAdapter } from './pool.js';
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { ResponsesRequestInput } from '../translate/responses.js';
 import { AccountTokenManager } from './accounts.js';
-import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage } from './common.js';
+import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, CreditBalance, ProviderUsage } from './common.js';
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js';
 export declare const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export declare const CODEX_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
@@ -83,6 +83,11 @@ export declare const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/
 export declare function fetchCodexResetCredits(session: CodexSession, fetchFn?: FetchFn, signal?: AbortSignal): Promise<NonNullable<ProviderUsage['resetCredits']>>;
 /** Spend one banked reset. The caller must already have confirmed the credit is still available. */
 export declare function consumeCodexResetCredit(session: CodexSession, creditId: string, requestId: string, fetchFn?: FetchFn, signal?: AbortSignal): Promise<void>;
+/**
+ * Map the purchased-credit object from `wham/usage`. Undefined when the
+ * backend omitted it, so a missing field is not reported as a zero balance.
+ */
+export declare function codexCreditBalance(value: unknown): CreditBalance | undefined;
 /**
  * Fetch the codex subscription usage from the ChatGPT backend wham/usage
  * endpoint (the source of the codex CLI `/status` rate-limit lines). The

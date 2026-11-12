@@ -116,10 +116,12 @@ export interface ResponsesStreamEvent {
     };
     response?: {
         status?: string;
+        output?: NonNullable<ResponsesStreamEvent['item']>[];
         usage?: ResponsesUsage;
         error?: {
             code?: string;
             message?: string;
+            headers?: unknown;
         };
         incomplete_details?: {
             reason?: string;
@@ -127,6 +129,17 @@ export interface ResponsesStreamEvent {
     };
     code?: string;
     message?: string;
+    /**
+     * Present on `error` events: the provider nests the real failure inside it
+     * (`{"type":"error","error":{"code","message","headers"}}`). The top-level
+     * `code`/`message` above stay for the flat shape Copilot and some gateways
+     * emit, so read both.
+     */
+    error?: {
+        code?: string;
+        message?: string;
+        headers?: unknown;
+    };
 }
 /** Responses `usage` object shape. */
 export interface ResponsesUsage {
@@ -150,9 +163,10 @@ export declare function mapResponsesUsage(usage: ResponsesUsage): TokenUsage;
  * Classify a Responses failure payload into a thrown LlmError.
  * @param code - provider error code, when present.
  * @param message - provider error message, when present.
+ * @param headers - the payload's `headers` member, carrying `retry-after`.
  * @returns the mapped error (context overflow, quota, otherwise SERVER).
  */
-export declare function responsesFailure(code: string | undefined, message: string | undefined): LlmError;
+export declare function responsesFailure(code: string | undefined, message: string | undefined, headers?: unknown): LlmError;
 /**
  * Push-model Responses SSE translator: feed each parsed event object to
  * {@link push} and collect the emitted harness StreamChunks. Block indexes
@@ -165,6 +179,8 @@ export declare class ResponsesStreamTranslator {
     private order;
     private nextIndex;
     private sawToolCall;
+    private declaredCalls;
+    private completedCallItems;
     /** Set once `response.completed` produced the terminal finish chunk. */
     terminated: boolean;
     private open;

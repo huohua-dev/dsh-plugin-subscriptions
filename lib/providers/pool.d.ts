@@ -15,7 +15,7 @@ import type { PoolDefinition, PoolMemberRef } from './pool-family.js';
 import { PoolHealthRegistry } from './pool-health.js';
 import type { PoolUsageTracker } from './pool-usage.js';
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
-export type PoolStrategy = 'priority' | 'quota_aware';
+export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized';
 export interface PoolAdapterOptions {
     /** The live subscription adapters, by provider route. */
     adapters: Partial<Record<ProviderId, AccountAwareAdapter>>;

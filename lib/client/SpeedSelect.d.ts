@@ -10,6 +10,7 @@ export interface SpeedState {
 /** What {@link SpeedSelect} renders from: visibility plus the current tier. */
 export interface SpeedSelectState {
     visible: boolean;
+    model?: string;
     tier: SpeedTier;
 }
 /**
@@ -36,7 +37,7 @@ export interface SpeedSelectInjected {
     /** Load the session's speed state; `visible` false keeps the control hidden. */
     loadSpeed: () => Promise<SpeedSelectState>;
     /** Set the session's speed tier; resolves false when the write failed. */
-    setSpeed: (tier: SpeedTier) => Promise<boolean>;
+    setSpeed: (tier: SpeedTier, displayedModel?: string) => Promise<boolean>;
 }
 /**
  * Props delivered by the slot outlet: the framework session kit and InputZone
@@ -59,7 +60,7 @@ export type SpeedSelectProps = PropsRuntime<'conversation.input.right'> & Partia
  */
 export declare function createSpeedLoader(connection: ConnectionHandle, models: () => ModelDirectoriesLike | undefined, sessionId: string): SpeedSelectInjected['loadSpeed'];
 /** The `setSpeed` half of the inject face: boolean outcome for the component's busy state. */
-export declare function createSpeedSetter(connection: ConnectionHandle, sessionId: string): SpeedSelectInjected['setSpeed'];
+export declare function createSpeedSetter(connection: ConnectionHandle, sessionId: string, models?: () => ModelDirectoriesLike | undefined): SpeedSelectInjected['setSpeed'];
 /**
  * The composer Speed control: a trigger reading `速度 · 快速`/`速度 · 标准`
  * that opens a two-row menu (standard/fast with descriptions, check mark on

@@ -1,16 +1,4 @@
-/**
- * Quota tracking for pool members: polls the providers' usage endpoints
- * (the same normalized `ProviderUsage` shape the Settings page consumes) and
- * turns the windows into a scheduling score.
- *
- * The score is a REQUIRED BURN RATE: the fraction of the window that must be
- * consumed per millisecond for the quota to be exactly used up at reset time
- * (`remaining / timeUntilReset`). Subscription quota does not roll over, so a
- * window about to reset with plenty left is the most urgent to spend — the
- * `quota_aware` strategy therefore prefers the highest-urgency member, which
- * over time converges on every window hitting zero right at its reset.
- */
-import type { ProviderUsage } from './common.js';
+import type { ProviderUsage, UsageWindow } from './common.js';
 import type { ProviderId } from '../auth/store.js';
 import type { ConcretePoolMember } from './pool-family.js';
 /** Near-full members are tried only after members below this fill level. */
@@ -25,7 +13,7 @@ export interface MemberQuota {
     available: boolean;
     /** A known exhausted window: exclude even if the upstream would accept paid credits. */
     exhausted?: true;
-    /** Required burn rate (fraction of window per ms); 0 when unknown. */
+    /** Burn rate in strategy-specific units; 0 when unmeasured. */
     urgency: number;
     /** Epoch ms of the snapshot this was computed from; 0 when none. */
     fetchedAt: number;
@@ -57,7 +45,7 @@ export declare class PoolUsageTracker {
      * @param member - the pool member to score (account resolved).
      * @returns availability plus the urgency score.
      */
-    quotaFor(member: ConcretePoolMember): Promise<MemberQuota>;
+    quotaFor(member: ConcretePoolMember, normalized?: boolean): Promise<MemberQuota>;
     /** Keep a known credit-spending risk blocked through usage-endpoint failures. */
     private failedQuota;
     /**
@@ -79,6 +67,8 @@ export declare class PoolUsageTracker {
      * without a plan keeps the plan already on record.
      */
     record(provider: ProviderId, account: string, snapshot: ProviderUsage): void;
+    /** Decorate a copy for UI consumers; raw snapshots and routing stay unchanged. */
+    displaySnapshotFor(provider: ProviderId, account: string, force?: boolean): Promise<ProviderUsage>;
     /** Recheck after an inference quota failure without erasing another model lane's exhaustion. */
     expire(provider: ProviderId, account: string): void;
     /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
@@ -95,3 +85,5 @@ export declare class PoolUsageTracker {
     /** Score one member against a snapshot's windows. */
     private score;
 }
+/** Dimensionless urgency for the opt-in strategy. Missing timing adds no reset bonus. */
+export declare function normalizedWindowUrgency(window: UsageWindow, now: number): number;

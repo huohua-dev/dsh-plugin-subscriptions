@@ -3,6 +3,7 @@
  * v1internal request envelope, plus response/SSE translation back to the
  * harness streaming contract.
  */
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
 import type { GenerateOptions, StreamChunk, TokenUsage, ToolSchema } from '@deepseek-ai/dsh-llm';
 import type { TranslatableMessage } from './resolved.js';
 /** Minimal Gemini part shape used by v1internal. */
@@ -63,7 +64,7 @@ export declare function toAntigravityTools(tools: readonly ToolSchema[], model?:
  * names are recovered from prior tool calls because DSH correlates results by
  * id while the Gemini wire requires both id and name.
  */
-export declare function toAntigravityContents(messages: readonly TranslatableMessage[], model?: string): {
+export declare function toAntigravityContents(messages: readonly TranslatableMessage[], model?: string, wireModel?: string | undefined): {
     role: 'user' | 'model';
     parts: AntigravityPart[];
 }[];
@@ -72,7 +73,10 @@ export declare function toAntigravityContents(messages: readonly TranslatableMes
  * When forStreaming is true and the model is Claude, caps maxOutputTokens at 64000
  * to avoid INVALID_ARGUMENT errors.
  */
-export declare function toAntigravityRequest(options: GenerateOptions, messages: readonly TranslatableMessage[], projectId: string, forStreaming?: boolean): AntigravityRequest;
+export declare function toAntigravityRequest(options: GenerateOptions, messages: readonly TranslatableMessage[], projectId: string, forStreaming?: boolean, wireModel?: string, profile?: {
+    thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH';
+    thinkingBudget?: number;
+}): AntigravityRequest;
 /** Antigravity SSE/non-stream response subset. */
 export interface AntigravityResponseEvent {
     response?: {
@@ -99,16 +103,21 @@ export declare class AntigravityStreamTranslator {
     private closed;
     private nextIndex;
     private sawContent;
+    private sawThoughtImage;
+    private sawReasoning;
     private sawToolCall;
     terminated: boolean;
+    private usage;
+    private readonly images;
+    constructor(attachments?: AttachmentStore, signal?: AbortSignal);
     private open;
     private close;
     private closeAll;
     private finish;
     /** Process one decoded Antigravity response frame. */
-    push(event: AntigravityResponseEvent): StreamChunk[];
+    push(event: AntigravityResponseEvent): Promise<StreamChunk[]>;
 }
 /** Consume Antigravity's SSE response into the DSH streaming contract. */
-export declare function streamAntigravity(stream: ReadableStream<Uint8Array>, onActivity?: () => void): AsyncGenerator<StreamChunk>;
+export declare function streamAntigravity(stream: ReadableStream<Uint8Array>, onActivity?: () => void, attachments?: AttachmentStore, signal?: AbortSignal): AsyncGenerator<StreamChunk>;
 /** Translate a non-stream generateContent response using the same state machine. */
-export declare function parseAntigravityResponse(event: AntigravityResponseEvent): StreamChunk[];
+export declare function parseAntigravityResponse(event: AntigravityResponseEvent, attachments?: AttachmentStore, signal?: AbortSignal): Promise<StreamChunk[]>;

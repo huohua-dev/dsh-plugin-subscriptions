@@ -126,6 +126,8 @@ export declare class AntigravityAdapter extends LlmAdapter {
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     /** Pool seam: stream through one specific account instead of the default. */
     streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk>;
+    /** Resolve a presentation id against the serving account, keeping legacy concrete ids usable. */
+    private selectedOptions;
     private streamCore;
     /** Non-stream forwarding seam used by tests and future DSH complete calls. */
     generate(options: GenerateOptions): Promise<StreamChunk[]>;

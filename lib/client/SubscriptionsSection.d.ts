@@ -31,6 +31,13 @@ export interface ProviderStatus {
     };
 }
 export type ClientVersionSource = 'npm' | 'local' | 'fallback' | 'config';
+/** Purchased Codex credit balance. Not a usage-limit reset card. */
+export interface CreditBalance {
+    hasCredits: boolean;
+    unlimited: boolean;
+    balance?: string;
+    overageLimitReached?: boolean;
+}
 /** One rate-limit window as answered by the `usage` endpoint. */
 export interface UsageWindow {
     kind: 'session' | 'weekly' | 'other';
@@ -40,9 +47,19 @@ export interface UsageWindow {
 }
 /** `usage` endpoint value: the node half owns this shape. */
 export interface ProviderUsage {
+    /** Browser receipt time, NOT proof of an upstream quota refresh. Memory-only. */
+    receivedAt?: number;
+    /** Display-only telemetry; does not affect routing or cooldown decisions. */
+    fetchedAt?: number;
+    staleAt?: number;
+    stale?: boolean;
+    refreshFailed?: boolean;
+    retryAt?: number;
     supported: boolean;
     windows?: UsageWindow[];
     plan?: string;
+    /** Remaining purchased Codex credits from `wham/usage`, when disclosed. */
+    credits?: CreditBalance;
     resetCredits?: {
         id?: string;
         grantedAt?: number;

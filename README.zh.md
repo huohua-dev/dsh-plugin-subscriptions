@@ -106,6 +106,8 @@ DSH peer 统一使用两段短范围，不设上限：`>=0.2.0-rc.2 || >=0.2.1-0
 
 Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本，包括未来预发布版。npm/pnpm 默认规则允许更高的正式版，但新的预发布版本线仍需显式锚点，例如为 `0.2.2` 预发布版添加 `>=0.2.2-0`。当前不设上限，不会拦截未来可能不兼容的版本；准入不代表运行时兼容保证。
 
+准入不等于运行时兼容，DSH `0.2.2-alpha.2` 就是例子：它从 `@deepseek-ai/dsh-client-ui-primitives` 移除了 `useAnchoredPosition`（以及 `AnchoredPositionOptions`，见升级指南「CSS-anchored menus」）。浏览器 bundle 在运行时才读取宿主模块，徽章里的具名导入因此变成 `undefined`，每次渲染都会抛错；框架会撤下崩溃的 slot 条目，输入框下方的订阅用量胶囊便悄无声息地消失。现在徽章自己负责弹层定位和点击外部关闭（`src/client/anchored-panel.ts`），只按名称读取宿主的图标。`test/host-primitives-contract.spec.ts` 固定了 DSH `0.2.2-rc.2` primitives 模块的导出集合，客户端代码一旦具名导入集合之外的名字就会失败；可选的 `test/client-bundle-browser.mjs` 会把构建好的 `lib/client.js` 放到缺少该 hook 的模块表上加载。
+
 `0.9.10` 版本新增对 DSH `0.2.1-rc.1` 的支持，开发依赖固定到该运行时（cordis `4.0.5`、schemastery `3.18.5`）。DSH 会拒绝启动 peer 依赖范围不包含当前运行时的插件，因此在任何 `0.2.1` 版本上 `0.9.9` 及更早版本都会被兼容性检查拦下；该版本 peer 范围加入了 `^0.2.1-rc.1`。该版本的工具准备状态块新增了惰性 `args` 视图，媒体工具视图并不读取它。脱字符范围已覆盖后续 `0.2.1-rc` 版本；它不包含的 `0.2.1-alpha.2` / `0.2.1-alpha.3` 已单独列出。
 
 `0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持；DSH `0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-rc.2` 和 `0.2.1-rc.3` 同样受支持，开发依赖固定到 `0.2.1-rc.2`。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。`0.2.1-rc.2` 还要求每个工具调用头都带上参数，且 Web 运行时的 provider 覆盖改为 `Volatile` 引用。该版本不会自动放行其他 `0.2` 预发布版本。
@@ -369,6 +371,8 @@ pnpm install   # 开发基线：已发布的 DSH 0.2.1-rc.2 依赖
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
+
+可选的离线浏览器检查：把 `PLAYWRIGHT_PATH` 指向已安装的 Playwright 包（`PLAYWRIGHT_CHROMIUM_EXECUTABLE` 可指定浏览器），先 `pnpm build`，再运行 `node test/client-bundle-browser.mjs`。它把构建好的 `lib/client.js` 原样加载到模拟 DSH `0.2.2` 模块表的页面上，驱动输入框下方的订阅用量胶囊：注册、定位、关闭和窗口缩放。`CLIENT_BUNDLE=<路径>` 可改测其他构建（例如已安装的副本）。测试只用合成账号和被拦截的浏览器路由，不需要 DSH 服务或凭据。
 
 `node scripts/make-dist.mjs <输出目录>`(由 `dist.yml` 在 `pnpm build`、`pnpm test` 之后执行)组装 `dist` 分支的内容:`lib/`、`cordis.patch.yml`、文档,以及去掉 scripts、devDependencies 和 pnpm 配置的 manifest。
 

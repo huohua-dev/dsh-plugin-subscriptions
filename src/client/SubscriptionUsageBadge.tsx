@@ -30,8 +30,14 @@ import { subscriptionChromeCss } from './provider-settings-styles.js'
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+// Namespace import on purpose: the only host value the badge reads is the
+// decorative glyph, looked up by name so a renamed icon degrades to nothing.
+// Positioning and outside-dismiss are local (`anchored-panel.ts`): a NAMED
+// import of a primitive the host drops becomes `undefined` at runtime and
+// throws on every render, which is how DSH 0.2.2-alpha.2 removing
+// `useAnchoredPosition` made this badge disappear.
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
-import { useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useAnchoredPanelPosition, useDismissOnOutsidePointer } from './anchored-panel.js'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
@@ -475,7 +481,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     }
   }, [])
 
-  const pos = useAnchoredPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: PANEL_GAP, margin: PANEL_MARGIN })
+  const pos = useAnchoredPanelPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: PANEL_GAP, margin: PANEL_MARGIN })
   useDismissOnOutsidePointer(rootRef, open, setOpen, panelRef)
   useEffect(() => {
     if (!open) return
@@ -683,7 +689,7 @@ function WindowRow({ label, window: w, translate, mode }: { label: string; windo
 
 /**
  * Unplaced portal panel: hidden but laid out so the clamp measures real
- * dimensions (the `useAnchoredPosition` measure pass).
+ * dimensions (the `useAnchoredPanelPosition` measure pass).
  */
 const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
 

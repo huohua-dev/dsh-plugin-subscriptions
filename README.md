@@ -107,6 +107,8 @@ DSH peers use two short ranges with no upper bound: `>=0.2.0-rc.2 || >=0.2.1-0`.
 
 Harness uses `includePrerelease: true` and admits all versions at or above the minimum, including future prereleases. npm/pnpm default matching admits later stable versions but requires an explicit prerelease anchor for each new release line (for example, `>=0.2.2-0` for `0.2.2` prereleases). There is no upper bound: future incompatible releases are not blocked, and admission does not guarantee runtime compatibility.
 
+Admission is not a runtime guarantee, and DSH `0.2.2-alpha.2` is the example: it removed `useAnchoredPosition` (and `AnchoredPositionOptions`) from `@deepseek-ai/dsh-client-ui-primitives` (the "CSS-anchored menus" upgrade guide). A browser bundle reads host modules at runtime, so the badge's named import became `undefined` and calling it threw on every render; the framework retires a crashed slot entry, so the subscription usage pill under the composer vanished with no visible error. The badge now places its dialog and handles outside dismissal itself (`src/client/anchored-panel.ts`) and reads only icon glyphs from the host primitives, by name. `test/host-primitives-contract.spec.ts` pins the export set of the DSH `0.2.2-rc.2` primitives module and fails when client code takes a named import outside it; the optional `test/client-bundle-browser.mjs` loads the built `lib/client.js` against a module table without that hook.
+
 Version `0.9.10` adds support for DSH `0.2.1-rc.1`, with development dependencies pinned to that runtime (cordis `4.0.5`, schemastery `3.18.5`). DSH refuses to start a plugin whose declared peer ranges exclude the running runtime, so `0.9.9` and earlier were blocked by the compatibility gate on any `0.2.1` build; the peer ranges gained `^0.2.1-rc.1`. Preparing tool-call blocks gained a lazy `args` view in this line, which the media tool views do not read. The caret range covers the later `0.2.1-rc` builds; the `0.2.1-alpha.2` / `0.2.1-alpha.3` builds, which it excludes, are listed explicitly.
 
 Version `0.9.7` added support for DSH `0.2.0-rc.2`; DSH `0.2.1-alpha.2`, `0.2.1-alpha.3`, `0.2.1-rc.2` and `0.2.1-rc.3` are supported as well, with development dependencies pinned to `0.2.1-rc.2`. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. `0.2.1-rc.2` additionally requires tool arguments on every call head and takes the web runtime's provider overrides as `Volatile` refs. Other `0.2` prereleases were not implicitly allowed in that release.
@@ -370,6 +372,8 @@ pnpm test      # node --test over compiled unit specs
 ```
 
 For the optional offline quota UI check, point `PLAYWRIGHT_PATH` at an installed Playwright package and run `node test/subscription-usage-browser.mjs`. It uses synthetic accounts and intercepted browser routes, without a DSH server or credentials.
+
+After `pnpm build`, `node test/client-bundle-browser.mjs` (same `PLAYWRIGHT_PATH`; `PLAYWRIGHT_CHROMIUM_EXECUTABLE` selects a browser) loads the built `lib/client.js` unmodified against a stand-in for the DSH `0.2.2` module table and drives the composer usage badge: registration, placement, dismissal and resizing. `CLIENT_BUNDLE=<path>` points it at another build, such as an installed copy.
 
 The pnpm package extension supplies the published UI primitives' browser dependencies for Node component tests. DSH supplies those libraries to the browser at runtime.
 

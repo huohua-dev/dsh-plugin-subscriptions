@@ -102,11 +102,13 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-DSH peer 统一使用两段短范围，不设上限：`>=0.2.0-rc.2 || >=0.2.1-0`。第一段保留最低支持版本；第二段让所有 `0.2.1` alpha/RC 都满足 npm/pnpm 默认的 peer 匹配规则，避免这五个 DSH peer 对该版本线产生版本不匹配警告。以后每条受支持的预发布版本线只维护一个锚点，不再逐个追加 RC。开发依赖仍固定到 `0.2.1-rc.2`。
+DSH peer 统一使用三段短范围，不设上限：`>=0.2.0-rc.2 || >=0.2.1-0 || >=0.2.2-0`。第一段保留最低支持版本；其后每一段是一条受支持版本线（`0.2.1`、`0.2.2`）的预发布锚点，让该线所有 alpha/RC 都满足 npm/pnpm 默认的 peer 匹配规则，避免这五个 DSH peer 对该版本线产生版本不匹配警告。以后每条受支持的预发布版本线只维护一个锚点，不再逐个追加 RC。开发依赖固定到 `0.2.2-rc.3`（cordis `4.1.0`）。
 
-Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本，包括未来预发布版。npm/pnpm 默认规则允许更高的正式版，但新的预发布版本线仍需显式锚点，例如为 `0.2.2` 预发布版添加 `>=0.2.2-0`。当前不设上限，不会拦截未来可能不兼容的版本；准入不代表运行时兼容保证。
+Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本，包括未来预发布版。npm/pnpm 默认规则允许更高的正式版，但新的预发布版本线仍需显式锚点，例如为 `0.2.3` 预发布版添加 `>=0.2.3-0`。当前不设上限，不会拦截未来可能不兼容的版本；准入不代表运行时兼容保证。
 
 准入不等于运行时兼容，DSH `0.2.2-alpha.2` 就是例子：它从 `@deepseek-ai/dsh-client-ui-primitives` 移除了 `useAnchoredPosition`（以及 `AnchoredPositionOptions`，见升级指南「CSS-anchored menus」）。浏览器 bundle 在运行时才读取宿主模块，徽章里的具名导入因此变成 `undefined`，每次渲染都会抛错；框架会撤下崩溃的 slot 条目，输入框下方的订阅用量胶囊便悄无声息地消失。现在徽章自己负责弹层定位和点击外部关闭（`src/client/anchored-panel.ts`），只按名称读取宿主的图标。`test/host-primitives-contract.spec.ts` 固定了 DSH `0.2.2-rc.2` primitives 模块的导出集合，客户端代码一旦具名导入集合之外的名字就会失败；可选的 `test/client-bundle-browser.mjs` 会把构建好的 `lib/client.js` 放到缺少该 hook 的模块表上加载。
+
+`0.9.16` 版本把 DSH `0.2.2` 纳入受支持版本线：peer 范围加入 `>=0.2.2-0` 锚点，开发依赖固定到 `0.2.2-rc.3`（cordis `4.1.0`；pnpm package extension 移到了 `pnpm-workspace.yaml`）。DSH `0.2.2` 的 `LlmError` 构造函数在类型上只接受内置失败码，运行时行为不变（见升级指南「`new LlmError` 只接受内置失败 code」），因此携带其他 code 的失败（Muse 等提供方自有的 code，或池重新抛出的成员失败）在宿主提供 `LlmError.fromFailure` 时用它构造，旧宿主上仍用原构造函数，所有 code 保持不变。图片/视频工具视图在宿主提供流式 `args` 视图时读取它，因此调用还在准备阶段时标题就能显示 prompt，旧宿主则回退到原始参数。Antigravity 推理档位新增 `xhigh`：`-xhigh` 模型 id 作为「Extra High」档位并入所属模型家族，默认档位仍为 High。
 
 `0.9.10` 版本新增对 DSH `0.2.1-rc.1` 的支持，开发依赖固定到该运行时（cordis `4.0.5`、schemastery `3.18.5`）。DSH 会拒绝启动 peer 依赖范围不包含当前运行时的插件，因此在任何 `0.2.1` 版本上 `0.9.9` 及更早版本都会被兼容性检查拦下；该版本 peer 范围加入了 `^0.2.1-rc.1`。该版本的工具准备状态块新增了惰性 `args` 视图，媒体工具视图并不读取它。脱字符范围已覆盖后续 `0.2.1-rc` 版本；它不包含的 `0.2.1-alpha.2` / `0.2.1-alpha.3` 已单独列出。
 
@@ -378,7 +380,7 @@ pnpm test      # 编译后跑 node --test 单测
 
 `prepare`(不带 `#dist` 的源码 git 安装时触发)执行 `tsdown.prepare.config.ts`:自包含打包两个面,所有 `@deepseek-ai/*` 依赖外部化 —— 运行时从 dsh 安装解析,保证不会引入第二份 cordis。
 
-pnpm 的 package extension 为 Node 组件测试补齐已发布 UI primitives 的浏览器依赖；实际浏览器运行时仍由 DSH 提供这些库。
+pnpm 的 package extension（位于 `pnpm-workspace.yaml`）为 Node 组件测试补齐已发布 UI primitives 的浏览器依赖；实际浏览器运行时仍由 DSH 提供这些库。
 
 改了代码后 `pnpm build` 并重启 `dsh web` 生效。
 

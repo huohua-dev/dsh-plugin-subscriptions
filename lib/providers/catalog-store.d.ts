@@ -27,6 +27,11 @@ export declare function modelsFilePath(): string;
  */
 export declare function sanitizeSnapshot(value: unknown): CatalogSnapshot | undefined;
 /**
+ * Wait for one catalog file's pending writes to settle. Stop discovery before
+ * calling this for teardown; it does not cancel producers or retry failed writes.
+ */
+export declare function drainCatalogWrites(path: string): Promise<void>;
+/**
  * Build the durable half of one provider's catalog cache over the shared
  * models.json file. Snapshot mutations are serialized across providers/accounts.
  * @param provider - the provider route keying the file entry.

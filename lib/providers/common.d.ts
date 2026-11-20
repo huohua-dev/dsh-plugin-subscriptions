@@ -33,6 +33,11 @@ export interface ModelEntry {
  * @returns the validated entries.
  */
 export declare function validateModels(models: readonly ModelEntry[], label: string): ModelEntry[];
+/** Re-raise an external or plugin-specific failure without losing its code or facts.
+ * DSH 0.2.2 narrows the constructor to built-in codes and adds fromFailure;
+ * earlier supported hosts accept arbitrary codes in the constructor instead.
+ */
+export declare function llmErrorFromFailure(failure: LlmError['failure'], options?: ErrorOptions): LlmError;
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
 export interface HttpLlmErrorOptions {
     /**

@@ -215,7 +215,7 @@ export declare const CLAUDE_REQUEST_IMAGE_BUDGET: number;
  * mark can still read an entry a one-hour mark wrote.
  * @returns the JSON body to POST.
  */
-export declare function claudeRequestBody(options: GenerateOptions, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string, cacheTtl?: PromptCacheTtl): Record<string, unknown>;
+export declare function claudeRequestBody(options: GenerateOptions<string>, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string, cacheTtl?: PromptCacheTtl): Record<string, unknown>;
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 export declare class ClaudeAdapter extends LlmAdapter {
     private readonly options;

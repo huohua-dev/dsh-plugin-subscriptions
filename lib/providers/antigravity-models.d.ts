@@ -1,5 +1,5 @@
 import type { DiscoveredModel } from './common.js';
-declare const EFFORTS: readonly ["low", "medium", "high"];
+declare const EFFORTS: readonly ["low", "medium", "high", "xhigh"];
 type Effort = typeof EFFORTS[number];
 export interface AntigravityModelGroup extends DiscoveredModel {
     variants?: Partial<Record<Effort, DiscoveredModel>>;

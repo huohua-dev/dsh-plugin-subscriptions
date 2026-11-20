@@ -7,15 +7,33 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { accountCatalogStore, catalogStore, sanitizeSnapshot } from '../src/providers/catalog-store.js'
+import { accountCatalogStore, catalogStore, drainCatalogWrites, sanitizeSnapshot } from '../src/providers/catalog-store.js'
 
 async function tempStorePath(): Promise<string> {
   return join(await mkdtemp(join(tmpdir(), 'dsh-models-')), 'models.json')
 }
+
+test('catalog drain waits for pending provider and account writes before teardown', async () => {
+  const path = await tempStorePath()
+  const provider = catalogStore('codex', path)
+  const account = accountCatalogStore('codex', 'secondary', path)
+  const snapshot = { at: 1, models: [{ id: 'model', name: 'Model' }] }
+  let completed = 0
+  const writes = Promise.allSettled([provider, account].map(store => store.save(snapshot).then(() => { completed++ })))
+  try {
+    await drainCatalogWrites(path)
+    assert.equal(completed, 2)
+    assert.deepEqual(await provider.load(), snapshot)
+    assert.deepEqual(await account.load(), snapshot)
+  } finally {
+    await writes
+    await rm(dirname(path), { recursive: true, force: true })
+  }
+})
 
 test('catalog store round-trips per-provider snapshots in one file', async () => {
   const path = await tempStorePath()

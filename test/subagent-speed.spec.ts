@@ -10,6 +10,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
 import { accountModelId } from '../src/providers/account-preferences.js'
+import { drainCatalogWrites, modelsFilePath } from '../src/providers/catalog-store.js'
 import { saveAccountSession } from '../src/auth/store.js'
 import * as plugin from '../src/index.js'
 import { createFakeConnection } from './fake-connection.js'
@@ -18,9 +19,11 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
   const home = await mkdtemp(join(tmpdir(), 'subagent-speed-rpc-'))
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = home
+  const catalogPath = modelsFilePath()
   const requests: Record<string, unknown>[] = []
   let supportsFast = true
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    init?.signal?.throwIfAborted()
     const url = String(input)
     if (url.includes('/codex/models')) return new Response(JSON.stringify({ models: [
       { slug: 'fast-model', display_name: 'Fast model', service_tiers: supportsFast ? [{ id: 'priority' }] : [] },
@@ -131,6 +134,8 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     await host.stream('child', 'priority') // existing explicit speed still works
   } finally {
     await host?.runtime.dispose()
+    // Catalog RPCs return before their best-effort writes have settled.
+    await drainCatalogWrites(catalogPath)
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
     await rm(home, { recursive: true, force: true })
   }

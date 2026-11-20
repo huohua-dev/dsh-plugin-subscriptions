@@ -229,6 +229,18 @@ function updateCatalogFile(path: string, update: (store: CatalogFile) => boolean
 }
 
 /**
+ * Wait for one catalog file's pending writes to settle. Stop discovery before
+ * calling this for teardown; it does not cancel producers or retry failed writes.
+ */
+export async function drainCatalogWrites(path: string): Promise<void> {
+  let pending: Promise<void> | undefined
+  while ((pending = catalogWrites.get(path)) !== undefined) {
+    // The caller that enqueued a write still receives any write error.
+    await pending.catch(() => undefined)
+  }
+}
+
+/**
  * Build the durable half of one provider's catalog cache over the shared
  * models.json file. Snapshot mutations are serialized across providers/accounts.
  * @param provider - the provider route keying the file entry.

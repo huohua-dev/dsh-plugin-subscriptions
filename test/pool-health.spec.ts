@@ -9,6 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { ACCOUNT_SUSPENDED_CODE } from '../src/providers/common.js'
 import {
   accountKey,
   AUTH_COOLDOWN_MS,
@@ -95,6 +96,28 @@ test('classifyPoolFailure: transient failures do not poison shared account healt
     assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), { action: 'switch' })
   }
 })
+
+test('classifyPoolFailure: a suspended account parks the whole account like an auth failure', () => {
+  // A terms-of-service ban is permanent and account-wide: retrying the member can
+  // never succeed, so the pool must switch away from every model on it, while the
+  // verdict is not a credential fault and keeps its own reason on the record.
+  const error = new LlmError('account suspended', ACCOUNT_SUSPENDED_CODE)
+  assert.equal(error.code, 'ACCOUNT_SUSPENDED')
+  assert.deepEqual(classifyPoolFailure(error, 'antigravity'), {
+    action: 'switch',
+    cooldownMs: AUTH_COOLDOWN_MS,
+    reason: 'ACCOUNT_SUSPENDED',
+    scope: 'account',
+  })
+  // The suspension outranks the model-scoped lane Antigravity uses for quotas.
+  assert.deepEqual(classifyPoolFailure(error, 'claude'), {
+    action: 'switch',
+    cooldownMs: AUTH_COOLDOWN_MS,
+    reason: 'ACCOUNT_SUSPENDED',
+    scope: 'account',
+  })
+})
+
 
 test('classifyPoolFailure: transport failures switch without a health record', () => {
   assert.deepEqual(classifyPoolFailure(new LlmError('dns', 'TRANSPORT'), 'codex'), { action: 'switch' })

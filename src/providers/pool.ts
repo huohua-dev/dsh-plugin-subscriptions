@@ -27,7 +27,7 @@ import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-f
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
-import { withAbortSignal } from './common.js'
+import { llmErrorFromFailure, withAbortSignal } from './common.js'
 import { streamAccountWithReplay } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
@@ -287,7 +287,7 @@ export class PoolAdapter extends LlmAdapter {
         }
         if (first.value.type === 'finish' && first.value.reason.kind === 'error') {
           const failure = first.value.reason.failure
-          throw new LlmError(failure.message, failure.code, failure)
+          throw llmErrorFromFailure(failure)
         }
       } catch (error: unknown) {
         try { await iterator.return?.() } catch { /* preserve the attempt failure */ }
@@ -436,7 +436,7 @@ export class PoolAdapter extends LlmAdapter {
     const reasons = pool.flatMap(member => {
       const blocker = this.options.health.memberBlocker(member.provider, member.account, member.model, now)
       const failure = blocker?.failure ?? failures.get(member)
-        ?? (blocker === undefined ? undefined : new LlmError(`account unavailable (${blocker.reason})`, blocker.reason))
+        ?? (blocker === undefined ? undefined : llmErrorFromFailure({ message: `account unavailable (${blocker.reason})`, code: blocker.reason }))
       if (failure === undefined) return []
       return [{
         member,
@@ -483,11 +483,12 @@ export class PoolAdapter extends LlmAdapter {
     // The pool-wide hint replaces the member's own: a member that can be
     // retried at once must not inherit another member's wait.
     const { providerRetryAfterMs: _memberHint, ...detail } = failure.failure
-    return new LlmError(message, failure.code, {
+    return llmErrorFromFailure({
       ...detail,
+      message,
+      code: failure.code,
       ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
-      cause: failure,
-    })
+    }, { cause: failure })
   }
 }
 

@@ -52,6 +52,7 @@ import {
   idleWatchdog,
   isDiscoveryAborted,
   isMissingOrInvalidCredential,
+  llmErrorFromFailure,
   mapFetchFailure,
   mergeReasoning,
   ModelCatalogCache,
@@ -1070,7 +1071,7 @@ export class MuseAdapter extends LlmAdapter {
     const lead = sent
       ? 'muse API error (HTTP 404): model_not_found'
       : 'muse request not sent: the model catalog is still empty on this network'
-    return new LlmError(`${lead}. ${MUSE_BLOCKED_NETWORK_HINT}`, MUSE_NETWORK_BLOCKED_CODE, sent ? { status: 404 } : {})
+    return llmErrorFromFailure({ message: `${lead}. ${MUSE_BLOCKED_NETWORK_HINT}`, code: MUSE_NETWORK_BLOCKED_CODE, ...sent ? { status: 404 } : {} })
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
@@ -1243,7 +1244,7 @@ export class MuseAdapter extends LlmAdapter {
   async activateUsage(account: string, signal?: AbortSignal): Promise<MuseSubscriptionUsageWire | undefined> {
     const listed = await this.listOwnModels('muse', account, signal, true)
     const model = listed[0]?.id ?? this.options.models[0]?.id
-    if (model === undefined) throw new LlmError('muse usage activation: this account lists no model to send the request to', 'MODEL_NOT_FOUND')
+    if (model === undefined) throw llmErrorFromFailure({ message: 'muse usage activation: this account lists no model to send the request to', code: 'MODEL_NOT_FOUND' })
     const session = await this.options.tokens.session(account)
     const usage = await activateMuseUsage(session.accessToken, model, this.fetchFn, signal,
       async () => (await this.options.tokens.session(account, true)).accessToken)

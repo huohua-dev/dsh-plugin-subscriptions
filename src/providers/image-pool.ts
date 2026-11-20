@@ -1,7 +1,7 @@
 /** Account scheduling shared by image generation and editing, independent of chat catalogs/quota. */
 import { LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { AccountTokenManager } from './accounts.js'
-import { httpLlmError } from './common.js'
+import { httpLlmError, llmErrorFromFailure } from './common.js'
 import type { RateLimitResetReader } from './rate-limit.js'
 import { AUTH_COOLDOWN_MS, DEFAULT_QUOTA_COOLDOWN_MS, TRANSIENT_COOLDOWN_MS, PoolHealthRegistry, memberKey } from './pool-health.js'
 import { accountScoped } from './account-proxy.js'
@@ -51,10 +51,11 @@ export class ImageAccountPool {
       const key = memberKey(provider, account, 'images')
       if (pooling && !this.health.isAvailable(key)) {
         const blocker = this.health.memberBlocker(provider, account, 'images')
-        if (blocker !== undefined) failures.push(new LlmError(
-          blocker.failure?.message ?? `image_generate: account unavailable (${blocker.reason})`, blocker.reason,
-          { providerRetryAfterMs: Math.max(1, blocker.unavailableUntil - Date.now()) },
-        ))
+        if (blocker !== undefined) failures.push(llmErrorFromFailure({
+          message: blocker.failure?.message ?? `image_generate: account unavailable (${blocker.reason})`,
+          code: blocker.reason,
+          providerRetryAfterMs: Math.max(1, blocker.unavailableUntil - Date.now()),
+        }))
         continue
       }
       let failure: LlmError

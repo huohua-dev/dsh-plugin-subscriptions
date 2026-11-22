@@ -35,6 +35,8 @@ export type PoolFailureAction = {
 } | {
     action: 'throw';
 };
+/** A bare Antigravity 429 may be transient; it does not establish a subscription reset. */
+export declare function isUnhintedAntigravityThrottle(error: LlmError, provider: ProviderId): boolean;
 /**
  * Classify a member failure. Quota and rate-limit failures cool down (using
  * the provider's own `retry-after` when sent, which is more accurate than

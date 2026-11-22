@@ -67,19 +67,37 @@ export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
  * and offers only `gemini-3.8-flash-tiered`; Gemini 4 Argon
  * (`gemini-4-argon-low/medium/high`) is listed only for the `hub` client
  * family at 2.23.0 or later (`ide/2.23.0` and `hub/2.11.0` both omit it).
+ * Tracks the shipped desktop build; the full catalog was re-verified at
+ * 2.34.0 (per-effort Flash ids present).
  */
-export const ANTIGRAVITY_IDE_VERSION = '2.23.0'
+export const ANTIGRAVITY_IDE_VERSION = '2.34.0'
 
-/** Go-style OS/arch pair the desktop client appends (`darwin/arm64`, `windows/amd64`). */
-function antigravityPlatform(platform: string, arch: string): string {
-  const os = platform === 'win32' ? 'windows' : platform
-  const cpu = arch === 'x64' ? 'amd64' : arch === 'ia32' ? '386' : arch
-  return `${os}/${cpu}`
+/**
+ * Changelist the shipped 2.34.0 language server stamps into its user agent
+ * (`cl=<n>`). It changes with every desktop build, so bump it together with
+ * {@link ANTIGRAVITY_IDE_VERSION}.
+ */
+const ANTIGRAVITY_CLIENT_CL = 1026637980
+
+/** Go `runtime.GOOS` spelling for one Node platform (`darwin`, `windows`, `linux`). */
+function antigravityOs(platform: string): string {
+  return platform === 'win32' ? 'windows' : platform
 }
 
-/** The Antigravity desktop user agent for one platform: `antigravity/hub/<version> <os>/<arch>`. */
+/** Go `runtime.GOARCH` spelling for one Node arch (`arm64`, `amd64`, `386`). */
+function antigravityArch(arch: string): string {
+  return arch === 'x64' ? 'amd64' : arch === 'ia32' ? '386' : arch
+}
+
+/**
+ * The Antigravity desktop user agent for one platform, in the language
+ * server's own shape: `antigravity/hub/<version> (aidev_client; os_type=<os>;
+ * arch=<arch>; cl=<n>)`. The server appends further optional segments
+ * (`auth_method=`, `purpose=`, ...) only when its context supplies them; the
+ * four segments above are the always-present core.
+ */
 export function antigravityUserAgent(platform: string = process.platform, arch: string = process.arch): string {
-  return `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} ${antigravityPlatform(platform, arch)}`
+  return `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} (aidev_client; os_type=${antigravityOs(platform)}; arch=${antigravityArch(arch)}; cl=${String(ANTIGRAVITY_CLIENT_CL)})`
 }
 
 export const ANTIGRAVITY_DEFAULT_USER_AGENT = antigravityUserAgent()
@@ -218,6 +236,20 @@ export function antigravityHeaders(accessToken: string, userAgent?: string): Rec
   }
 }
 
+/**
+ * The `loadCodeAssist` ClientMetadata in the desktop's shape. Only platform
+ * enum spellings confirmed from the shipped protobuf descriptor are sent;
+ * unconfirmed platforms stay `PLATFORM_UNSPECIFIED` rather than guessed.
+ */
+function antigravityClientMetadata(): Record<string, string> {
+  return {
+    ideType: 'ANTIGRAVITY',
+    ideVersion: ANTIGRAVITY_IDE_VERSION,
+    platform: process.platform === 'darwin' && process.arch === 'arm64' ? 'DARWIN_ARM64' : 'PLATFORM_UNSPECIFIED',
+    pluginType: 'GEMINI',
+  }
+}
+
 /** POST a v1internal JSON method and classify non-2xx responses. */
 async function callInternal<T>(
   method: string,
@@ -260,7 +292,7 @@ export async function discoverAntigravityAccount(
   runtime: AntigravityRuntimeConfig = {},
   fetchFn: FetchFn = proxiedFetch,
 ): Promise<AntigravityAccountInfo> {
-  const metadata = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }
+  const metadata = antigravityClientMetadata()
   const load = await callInternal<LoadCodeAssistResponse>('loadCodeAssist', { metadata }, accessToken, runtime, fetchFn)
   let projectId = projectIdOf(load.cloudaicompanionProject)
   if (projectId === undefined && runtime.onboard !== false) {
@@ -539,7 +571,7 @@ export async function fetchAntigravityUsage(
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
-  const metadata = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }
+  const metadata = antigravityClientMetadata()
   const readWindows = async (): Promise<UsageWindow[]> => {
     let shared: UsageWindow[] = []
     try {
@@ -611,10 +643,9 @@ export async function requestAntigravityContent(
 ): Promise<Response> {
   return fetchAntigravity(stream ? 'streamGenerateContent?alt=sse' : 'generateContent', {
     method: 'POST',
-    headers: {
-      ...antigravityHeaders(session.accessToken, runtime.userAgent),
-      accept: stream ? 'text/event-stream' : 'application/json',
-    },
+    // The desktop language server sends no Accept header; the transport is
+    // chosen by the endpoint (`?alt=sse`), not by content negotiation.
+    headers: antigravityHeaders(session.accessToken, runtime.userAgent),
     body: JSON.stringify(payload),
     ...signal === undefined ? {} : { signal },
   }, runtime, fetchFn)

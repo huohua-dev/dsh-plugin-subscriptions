@@ -44,13 +44,14 @@ export interface AntigravityPart {
   functionResponse?: { id: string; name: string; response: Record<string, unknown> }
 }
 
-/** Full Antigravity request envelope. */
+/**
+ * Full Antigravity request envelope. Fields are declared (and serialized) in
+ * protobuf field order — project(1), requestId(2), request(3), model(4),
+ * userAgent(6), requestType(7) — matching the desktop client's protojson.
+ */
 export interface AntigravityRequest {
   project: string
   requestId: string
-  model: string
-  userAgent: 'antigravity'
-  requestType: 'agent'
   request: {
     contents: { role: 'user' | 'model'; parts: AntigravityPart[] }[]
     sessionId: string
@@ -59,6 +60,9 @@ export interface AntigravityRequest {
     toolConfig?: { functionCallingConfig: { mode: 'VALIDATED' } }
     generationConfig?: Record<string, unknown>
   }
+  model: string
+  userAgent: 'antigravity'
+  requestType: 'agent'
 }
 
 /**
@@ -232,6 +236,23 @@ export function toAntigravityContents(messages: readonly TranslatableMessage[], 
 }
 
 /**
+ * The wire `sessionId` for one harness session. The desktop language server
+ * derives it by FNV-1a 64-bit hashing its conversation identifier and
+ * formatting the result as a signed decimal int64, so the harness session id
+ * is hashed the same way: stable per conversation, and indistinguishable in
+ * shape from the client's own ids (a raw `session-...` string or UUID is
+ * not a form the client ever sends).
+ */
+export function antigravitySessionId(session: string): string {
+  let hash = 0xcbf29ce484222325n
+  for (const byte of new TextEncoder().encode(session)) {
+    hash ^= BigInt(byte)
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn
+  }
+  return BigInt.asIntN(64, hash).toString()
+}
+
+/**
  * Build one v1internal generateContent/streamGenerateContent request.
  * When forStreaming is true and the model is Claude, caps maxOutputTokens at 64000
  * to avoid INVALID_ARGUMENT errors.
@@ -269,13 +290,10 @@ export function toAntigravityRequest(
     ? message.content.filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text').map(block => block.text)
     : [])
   const system = options.system ?? (systemTexts.length > 0 ? systemTexts.join('\n\n') : undefined)
-  const sessionId = options.sessionId === undefined ? randomUUID() : String(options.sessionId)
+  const sessionId = antigravitySessionId(options.sessionId === undefined ? randomUUID() : String(options.sessionId))
   return {
     project: projectId,
     requestId: `agent/${String(Date.now())}/${randomUUID()}/4`,
-    model: wireModel,
-    userAgent: 'antigravity',
-    requestType: 'agent',
     request: {
       contents: toAntigravityContents(messages, options.model, wireModel),
       sessionId,
@@ -286,6 +304,9 @@ export function toAntigravityRequest(
       },
       ...Object.keys(generationConfig).length === 0 ? {} : { generationConfig },
     },
+    model: wireModel,
+    userAgent: 'antigravity',
+    requestType: 'agent',
   }
 }
 

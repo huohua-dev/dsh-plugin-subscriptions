@@ -26,6 +26,7 @@ import {
 } from '../src/providers/antigravity.js'
 import type { CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import {
+  antigravitySessionId,
   AntigravityStreamTranslator,
   streamAntigravity,
   toAntigravityRequest,
@@ -192,11 +193,13 @@ test('Antigravity presents the 2.x desktop identity, falling back from a blank c
   // A 1.x agent hides the per-effort Gemini 3.8 Flash ids from the catalog
   // and 404s them on generate, and Gemini 4 Argon is listed only for the
   // `hub` family at 2.23.0+, so the default must be the hub 2.23+ form.
-  assert.equal(antigravityUserAgent('darwin', 'arm64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} darwin/arm64`)
-  assert.equal(antigravityUserAgent('linux', 'x64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} linux/amd64`)
-  assert.equal(antigravityUserAgent('win32', 'x64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} windows/amd64`)
+  // The language server's own form: name/subclient/version followed by the
+  // parenthesized `aidev_client; os_type=...; arch=...; cl=...` segments.
+  assert.equal(antigravityUserAgent('darwin', 'arm64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} (aidev_client; os_type=darwin; arch=arm64; cl=1026637980)`)
+  assert.equal(antigravityUserAgent('linux', 'x64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)`)
+  assert.equal(antigravityUserAgent('win32', 'x64'), `antigravity/hub/${ANTIGRAVITY_IDE_VERSION} (aidev_client; os_type=windows; arch=amd64; cl=1026637980)`)
   assert.equal(ANTIGRAVITY_DEFAULT_USER_AGENT, antigravityUserAgent(process.platform, process.arch))
-  assert.match(ANTIGRAVITY_DEFAULT_USER_AGENT, /^antigravity\/hub\/2\.\d+\.\d+ \S+\/\S+$/)
+  assert.match(ANTIGRAVITY_DEFAULT_USER_AGENT, /^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; os_type=\S+; arch=\S+; cl=\d+\)$/)
   const [major, minor] = ANTIGRAVITY_IDE_VERSION.split('.').map(Number)
   assert.ok(major > 2 || (major === 2 && minor >= 23), 'Gemini 4 Argon needs a 2.23.0+ client version')
 
@@ -285,6 +288,25 @@ test('request conversion carries system, images, tools, tool results, and signed
   }
   const image = payload.request.contents.flatMap(content => content.parts).find(part => part.inlineData)
   assert.equal(image?.inlineData?.data, 'aGVsbG8=')
+})
+
+test('the envelope serializes in proto field order with a hashed decimal sessionId', () => {
+  // The desktop client marshals the envelope with protojson (field-number
+  // order) and derives sessionId as the FNV-1a 64-bit hash of its
+  // conversation id formatted as a signed decimal int64 — never a raw
+  // harness session string or UUID.
+  assert.equal(antigravitySessionId(''), BigInt.asIntN(64, 0xcbf29ce484222325n).toString())
+  const payload = toAntigravityRequest(
+    { ...options([]), sessionId: 'session-abc' as NonNullable<GenerateOptions['sessionId']> },
+    [message('user', [{ type: 'text', text: 'hi' }])],
+    'project-123',
+  )
+  assert.deepEqual(Object.keys(payload), ['project', 'requestId', 'request', 'model', 'userAgent', 'requestType'])
+  const wire = JSON.parse(JSON.stringify(payload))
+  assert.deepEqual(Object.keys(wire), ['project', 'requestId', 'request', 'model', 'userAgent', 'requestType'])
+  assert.equal(payload.request.sessionId, antigravitySessionId('session-abc'))
+  assert.match(payload.request.sessionId, /^-?\d+$/)
+  assert.equal(toAntigravityRequest(options([]), [], 'project-123').request.sessionId.match(/^-?\d+$/) !== null, true)
 })
 
 test('first-class harness tool messages become correlated function responses', () => {

@@ -16,7 +16,7 @@ import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
 import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
-import { OAuthEndpointError } from '../src/providers/common.js'
+import { httpLlmError, OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
 import type { ProviderId } from '../src/auth/store.js'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
@@ -873,6 +873,58 @@ test('stream: an exhausted pool throws RATE_LIMIT with the earliest recovery hin
     },
   )
 })
+
+for (const remainingAfterThrottle of [80, 0]) {
+  test(`Antigravity bare 429 retries after local backoff, respecting refreshed quota (${remainingAfterThrottle}% left)`, async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+    const model = 'gemini-3.8-flash'
+    const options = { ...OPTIONS, provider: 'antigravity', model }
+    const failure = await httpLlmError(Response.json({ error: {
+      code: 429, message: 'Resource has been exhausted (e.g. check quota).', status: 'RESOURCE_EXHAUSTED',
+    } }, { status: 429 }), 'Antigravity API')
+    assert.equal(failure.code, 'RATE_LIMIT')
+    assert.equal(failure.failure.providerRetryAfterMs, undefined)
+    let backedOff = false
+    let polls = 0
+    const antigravity = new FakeAdapter(() => backedOff ? serveOk() : serveFail(failure))
+    const { pool, health } = makePool({ antigravity }, {
+      families: new Map([[poolKey('antigravity', model), { members: [
+        { provider: 'antigravity', account: 'a1', model },
+        { provider: 'antigravity', account: 'a2', model },
+      ] }]]),
+      usage: (_provider, account) => async () => {
+        polls++
+        const remaining = backedOff ? account === 'a1' ? remainingAfterThrottle : 0 : 80
+        return windowUsage(100 - remaining, 60_000)
+      },
+    })
+    const attempt = async () => collect((await pool.prepareCall('antigravity', model)).stream(options))
+    await assert.rejects(attempt, (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'RATE_LIMIT')
+      assert.equal(error.failure.status, 429)
+      assert.equal(error.failure.providerRetryAfterMs, 15_000)
+      assert.match(error.message, /local backoff.*15s.*no provider reset time/i)
+      return true
+    })
+    t.mock.timers.tick(1_000)
+    await assert.rejects(attempt, /local backoff.*14s.*no provider reset time/i)
+    assert.deepEqual(antigravity.accounts, ['a1', 'a2'], 'fail over, but do not send another request while cooling')
+    assert.equal(polls, 2)
+    assert.equal(health.isMemberAvailable('antigravity', 'a1', 'gemini-4-argon'), true)
+
+    t.mock.timers.tick(14_000)
+    backedOff = true
+    if (remainingAfterThrottle > 0) {
+      assert.ok((await attempt()).some(chunk => chunk.type === 'text-delta'))
+      assert.deepEqual(antigravity.accounts, ['a1', 'a2', 'a1'])
+    } else {
+      await assert.rejects(attempt, { code: 'QUOTA' })
+      assert.deepEqual(antigravity.accounts, ['a1', 'a2'], 'do not generate after subscriptions are known exhausted')
+    }
+    assert.equal(polls, 4, 'check both accounts’ quota again before retrying')
+  })
+}
 
 test('Codex stream overload preserves the reported seconds through pool exhaustion', async t => {
   const now = Date.now()

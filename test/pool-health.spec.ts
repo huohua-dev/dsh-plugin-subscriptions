@@ -45,12 +45,27 @@ test('classifyPoolFailure: claude quota failures stay member-scoped (per-model l
 
 test('classifyPoolFailure: an Antigravity quota parks only the exhausted model', () => {
   // One model's 35-hour quota reset must not park the account's other models.
-  const error = new LlmError('quota', 'RATE_LIMIT', { providerRetryAfterMs: 35 * 3_600_000 })
+  const error = new LlmError('quota', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 35 * 3_600_000 })
   assert.deepEqual(classifyPoolFailure(error, 'antigravity'), {
     action: 'switch',
     cooldownMs: 35 * 3_600_000,
     reason: 'RATE_LIMIT',
     scope: 'member',
+  })
+})
+
+test('classifyPoolFailure: only unhinted Antigravity HTTP 429 uses short backoff', () => {
+  const unhinted = new LlmError('Resource has been exhausted (e.g. check quota).', 'RATE_LIMIT', { status: 429 })
+  assert.deepEqual(classifyPoolFailure(unhinted, 'antigravity'), {
+    action: 'switch', cooldownMs: 15_000, reason: 'RATE_LIMIT', scope: 'member',
+  })
+  for (const error of [new LlmError('quota reached', 'QUOTA', { status: 429 }), new LlmError('stream throttled', 'RATE_LIMIT')]) {
+    assert.deepEqual(classifyPoolFailure(error, 'antigravity'), {
+      action: 'switch', cooldownMs: DEFAULT_QUOTA_COOLDOWN_MS, reason: error.code, scope: 'member',
+    })
+  }
+  assert.deepEqual(classifyPoolFailure(unhinted, 'codex'), {
+    action: 'switch', cooldownMs: DEFAULT_QUOTA_COOLDOWN_MS, reason: 'RATE_LIMIT', scope: 'account',
   })
 })
 

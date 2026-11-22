@@ -25,7 +25,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { AccountAwareAdapter } from './accounts.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
-import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
+import { accountKey, classifyPoolFailure, isUnhintedAntigravityThrottle, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { llmErrorFromFailure, withAbortSignal } from './common.js'
 import { streamAccountWithReplay } from './replay.js'
@@ -466,14 +466,17 @@ export class PoolAdapter extends LlmAdapter {
     }
     const { failure } = selected
     const { retryAfterMs } = earliest
-    const recovers = retryAfterMs === undefined ? undefined : formatDuration(retryAfterMs)
+    const localBackoff = isUnhintedAntigravityThrottle(earliest.failure, earliest.member.provider)
     let message = tried > 0
       ? `pool "${model}" exhausted: ${tried} of ${pool.length} member(s) failed;`
         + ` ${selected.member === last ? 'last ' : ''}${memberLabel(selected.member)} (${selected.detail})`
-        + (recovers === undefined ? '' : `; earliest member recovers in ${recovers}`)
-      : `pool "${model}" exhausted: every member is cooling down;`
+      : `pool "${model}" exhausted: ${localBackoff ? 'no member is currently eligible' : 'every member is cooling down'};`
         + ` ${selected.key} (${selected.detail})`
-        + (recovers === undefined ? '' : ` recovers in ${recovers}`)
+    if (retryAfterMs !== undefined) {
+      const wait = formatDuration(retryAfterMs)
+      if (localBackoff) message += `; local backoff: retry in ${wait} (no provider reset time)`
+      else message += tried > 0 ? `; earliest member recovers in ${wait}` : ` recovers in ${wait}`
+    }
     const allQuota = reasons.length === pool.length && reasons.every(item => item.failure.code === QUOTA_EXCEEDED_CODE)
     if (allQuota) {
       message += '; subscription quota exhausted for all available accounts;'

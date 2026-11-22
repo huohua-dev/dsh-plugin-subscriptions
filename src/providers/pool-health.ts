@@ -26,6 +26,8 @@ export function accountKey(provider: ProviderId, account: string): string {
 
 /** Default cooldown when a quota/rate failure carries no `retry-after`. */
 export const DEFAULT_QUOTA_COOLDOWN_MS = 5 * 60_000
+/** Short member-local backoff for an inconclusive Antigravity 429. Keep within DSH's default 60s retry ceiling. */
+const ANTIGRAVITY_UNHINTED_RATE_LIMIT_COOLDOWN_MS = 15_000
 /** Auth failures recheck after a day; a re-login clears the record immediately. */
 export const AUTH_COOLDOWN_MS = 24 * 60 * 60_000
 /** Transient server-side failures cool down briefly. */
@@ -56,6 +58,12 @@ function retryAfterMs(error: LlmError): number | undefined {
   return error.failure.providerRetryAfterMs
 }
 
+/** A bare Antigravity 429 may be transient; it does not establish a subscription reset. */
+export function isUnhintedAntigravityThrottle(error: LlmError, provider: ProviderId): boolean {
+  return provider === 'antigravity' && error.code === 'RATE_LIMIT' && error.failure.status === 429
+    && retryAfterMs(error) === undefined
+}
+
 /**
  * Classify a member failure. Quota and rate-limit failures cool down (using
  * the provider's own `retry-after` when sent, which is more accurate than
@@ -76,7 +84,9 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
     case 'RATE_LIMIT':
       return {
         action: 'switch',
-        cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS,
+        cooldownMs: isUnhintedAntigravityThrottle(error, provider)
+          ? ANTIGRAVITY_UNHINTED_RATE_LIMIT_COOLDOWN_MS
+          : retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS,
         reason: error.code,
         scope: MODEL_SCOPED_QUOTA_PROVIDERS.has(provider) ? 'member' : 'account',
       }

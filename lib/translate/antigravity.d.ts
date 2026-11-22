@@ -81,6 +81,8 @@ export declare function toAntigravityContents(messages: readonly TranslatableMes
  * not a form the client ever sends).
  */
 export declare function antigravitySessionId(session: string): string;
+/** Apply {@link ANTIGRAVITY_SYSTEM_REWRITES} to one Antigravity-bound system prompt. */
+export declare function antigravitySystemText(system: string): string;
 /**
  * Build one v1internal generateContent/streamGenerateContent request.
  * When forStreaming is true and the model is Claude, caps maxOutputTokens at 64000

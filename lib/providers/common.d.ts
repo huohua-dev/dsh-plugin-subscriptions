@@ -38,6 +38,18 @@ export declare function validateModels(models: readonly ModelEntry[], label: str
  * earlier supported hosts accept arbitrary codes in the constructor instead.
  */
 export declare function llmErrorFromFailure(failure: LlmError['failure'], options?: ErrorOptions): LlmError;
+/**
+ * The code for an account Google has disabled for a terms-of-service violation.
+ *
+ * The cast is deliberate. `BuiltinLlmFailureCode` is a closed union of the
+ * codes dsh-llm ships, and none of them distinguishes a permanently suspended
+ * account from a broken credential; widening that union is upstream's call, not
+ * this plugin's. At runtime an LlmError accepts any non-empty string as its
+ * code, so the value survives construction and reaches the UI intact, where
+ * rendering previously showed every `AUTH` as an invalid API key and hid the
+ * real reason the account was rejected.
+ */
+export declare const ACCOUNT_SUSPENDED_CODE: ConstructorParameters<typeof LlmError>[1];
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
 export interface HttpLlmErrorOptions {
     /**

@@ -25,9 +25,17 @@ export declare const ANTIGRAVITY_PROD_BASE_URL = "https://cloudcode-pa.googleapi
  * and offers only `gemini-3.8-flash-tiered`; Gemini 4 Argon
  * (`gemini-4-argon-low/medium/high`) is listed only for the `hub` client
  * family at 2.23.0 or later (`ide/2.23.0` and `hub/2.11.0` both omit it).
+ * Tracks the shipped desktop build; the full catalog was re-verified at
+ * 2.34.0 (per-effort Flash ids present).
  */
-export declare const ANTIGRAVITY_IDE_VERSION = "2.23.0";
-/** The Antigravity desktop user agent for one platform: `antigravity/hub/<version> <os>/<arch>`. */
+export declare const ANTIGRAVITY_IDE_VERSION = "2.34.0";
+/**
+ * The Antigravity desktop user agent for one platform, in the language
+ * server's own shape: `antigravity/hub/<version> (aidev_client; os_type=<os>;
+ * arch=<arch>; cl=<n>)`. The server appends further optional segments
+ * (`auth_method=`, `purpose=`, ...) only when its context supplies them; the
+ * four segments above are the always-present core.
+ */
 export declare function antigravityUserAgent(platform?: string, arch?: string): string;
 export declare const ANTIGRAVITY_DEFAULT_USER_AGENT: string;
 export declare const ANTIGRAVITY_PREEMPT_MS: number;

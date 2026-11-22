@@ -26,13 +26,14 @@ export interface AntigravityPart {
         response: Record<string, unknown>;
     };
 }
-/** Full Antigravity request envelope. */
+/**
+ * Full Antigravity request envelope. Fields are declared (and serialized) in
+ * protobuf field order — project(1), requestId(2), request(3), model(4),
+ * userAgent(6), requestType(7) — matching the desktop client's protojson.
+ */
 export interface AntigravityRequest {
     project: string;
     requestId: string;
-    model: string;
-    userAgent: 'antigravity';
-    requestType: 'agent';
     request: {
         contents: {
             role: 'user' | 'model';
@@ -54,6 +55,9 @@ export interface AntigravityRequest {
         };
         generationConfig?: Record<string, unknown>;
     };
+    model: string;
+    userAgent: 'antigravity';
+    requestType: 'agent';
 }
 /** Map harness tool schemas to Gemini function declarations. */
 export declare function toAntigravityTools(tools: readonly ToolSchema[], model?: string): {
@@ -68,6 +72,15 @@ export declare function toAntigravityContents(messages: readonly TranslatableMes
     role: 'user' | 'model';
     parts: AntigravityPart[];
 }[];
+/**
+ * The wire `sessionId` for one harness session. The desktop language server
+ * derives it by FNV-1a 64-bit hashing its conversation identifier and
+ * formatting the result as a signed decimal int64, so the harness session id
+ * is hashed the same way: stable per conversation, and indistinguishable in
+ * shape from the client's own ids (a raw `session-...` string or UUID is
+ * not a form the client ever sends).
+ */
+export declare function antigravitySessionId(session: string): string;
 /**
  * Build one v1internal generateContent/streamGenerateContent request.
  * When forStreaming is true and the model is Claude, caps maxOutputTokens at 64000

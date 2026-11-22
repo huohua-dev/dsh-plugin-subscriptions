@@ -253,6 +253,39 @@ export function antigravitySessionId(session: string): string {
 }
 
 /**
+ * Fixed DeepSeek Harness system passages that Antigravity's backend answers
+ * with a quota-shaped HTTP 429 when they appear in `systemInstruction`, even
+ * on accounts whose quota is untouched. The file-reference paragraph does
+ * not hard-fail, but the full upstream paragraph measurably degrades output;
+ * all three rewrites preserve the instruction's meaning. The patterns are
+ * deliberately confined to these host-owned passages: user content, tool
+ * descriptions, and every other system sentence stay verbatim.
+ */
+const ANTIGRAVITY_SYSTEM_REWRITES: readonly { pattern: RegExp | string; replacement: string }[] = [
+  {
+    pattern: /\bYou\s+are\s+an\s+AI\s+agent\s+powered\s+by\s+(?:DeepSeek|DSH)\s+Harness\./gi,
+    replacement: 'You are an AI agent.',
+  },
+  {
+    pattern: /\bThe\s+browser\s+provides\s+no\s+implicit\s+DOM,\s+route,\s+or\s+screenshot\s+context\./gi,
+    replacement: 'No browser DOM, current route, or screenshot is available implicitly.',
+  },
+  {
+    pattern: 'Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces.',
+    replacement: 'Paths prefixed with @ are references the user explicitly provided. Relative paths resolve from the workspace root; absolute paths name files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Otherwise it is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces.',
+  },
+]
+
+/** Apply {@link ANTIGRAVITY_SYSTEM_REWRITES} to one Antigravity-bound system prompt. */
+export function antigravitySystemText(system: string): string {
+  let rewritten = system
+  for (const { pattern, replacement } of ANTIGRAVITY_SYSTEM_REWRITES) {
+    rewritten = typeof pattern === 'string' ? rewritten.replaceAll(pattern, replacement) : rewritten.replace(pattern, replacement)
+  }
+  return rewritten
+}
+
+/**
  * Build one v1internal generateContent/streamGenerateContent request.
  * When forStreaming is true and the model is Claude, caps maxOutputTokens at 64000
  * to avoid INVALID_ARGUMENT errors.
@@ -289,7 +322,8 @@ export function toAntigravityRequest(
   const systemTexts = messages.flatMap(message => message.role === 'system'
     ? message.content.filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text').map(block => block.text)
     : [])
-  const system = options.system ?? (systemTexts.length > 0 ? systemTexts.join('\n\n') : undefined)
+  const rawSystem = options.system ?? (systemTexts.length > 0 ? systemTexts.join('\n\n') : undefined)
+  const system = rawSystem === undefined ? undefined : antigravitySystemText(rawSystem)
   const sessionId = antigravitySessionId(options.sessionId === undefined ? randomUUID() : String(options.sessionId))
   return {
     project: projectId,

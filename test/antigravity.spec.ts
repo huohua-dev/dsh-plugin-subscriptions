@@ -27,6 +27,7 @@ import {
 import type { CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import {
   antigravitySessionId,
+  antigravitySystemText,
   AntigravityStreamTranslator,
   streamAntigravity,
   toAntigravityRequest,
@@ -307,6 +308,52 @@ test('the envelope serializes in proto field order with a hashed decimal session
   assert.equal(payload.request.sessionId, antigravitySessionId('session-abc'))
   assert.match(payload.request.sessionId, /^-?\d+$/)
   assert.equal(toAntigravityRequest(options([]), [], 'project-123').request.sessionId.match(/^-?\d+$/) !== null, true)
+})
+
+test('known DSH system passages are paraphrased only in Antigravity systemInstruction', () => {
+  const fileReference = 'Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces.'
+  const system = [
+    'You are an AI agent powered by DeepSeek Harness.',
+    'The browser provides no implicit DOM, route, or screenshot context.',
+    fileReference,
+    'Keep this sentence unchanged.',
+  ].join('\n\n')
+  const rewritten = antigravitySystemText(system)
+  assert.match(rewritten, /^You are an AI agent\./)
+  assert.doesNotMatch(rewritten, /powered by DeepSeek Harness/)
+  assert.match(rewritten, /No browser DOM, current route, or screenshot is available implicitly\./)
+  assert.doesNotMatch(rewritten, /The browser provides no implicit DOM/)
+  assert.match(rewritten, /^Paths prefixed with @ are references the user explicitly provided\./m)
+  assert.doesNotMatch(rewritten, /Tokens prefixed with @ are paths/)
+  assert.match(rewritten, /Keep this sentence unchanged\./)
+
+  // The upstream match is insensitive to case and repeated whitespace in the
+  // two hard-failing sentences, so the rewrite must be too.
+  assert.equal(
+    antigravitySystemText('you  are an ai agent powered by dsh harness. the browser provides no implicit dom, route, or screenshot context.'),
+    'You are an AI agent. No browser DOM, current route, or screenshot is available implicitly.',
+  )
+
+  const payload = toAntigravityRequest(
+    { ...options([]), system },
+    [message('user', [{ type: 'text', text: 'The browser provides no implicit DOM, route, or screenshot context.' }])],
+    'project-123',
+  )
+  assert.equal(payload.request.systemInstruction?.parts[0].text, rewritten)
+  // The same words in conversation content are data, not a system prompt:
+  // they must reach the model exactly as the user wrote them.
+  assert.equal(payload.request.contents[0].parts[0].text, 'The browser provides no implicit DOM, route, or screenshot context.')
+
+  const { system: _omittedSystem, ...withoutSystem } = options([])
+  const fromMessage = toAntigravityRequest(
+    withoutSystem,
+    [
+      message('system', [{ type: 'text', text: 'You are an AI agent powered by DeepSeek Harness.' }]),
+      message('user', [{ type: 'text', text: 'hi' }]),
+    ],
+    'project-123',
+  )
+  assert.equal(fromMessage.request.systemInstruction?.parts[0].text, 'You are an AI agent.')
 })
 
 test('first-class harness tool messages become correlated function responses', () => {

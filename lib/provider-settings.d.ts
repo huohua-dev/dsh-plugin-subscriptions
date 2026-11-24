@@ -36,11 +36,16 @@ export interface ProviderPreferences {
     /** Absent follows discovery; an explicit selection hides newly discovered models. */
     visibleModels?: string[];
     contextWindows?: Record<string, number>;
+    /** Codex-only provider-wide local context budget and output reservation. */
+    contextWindow?: number;
+    defaultMaxTokens?: number;
     /** Codex only: per-model defaults for subagents, independent of main-session speed. */
     subagentSpeeds?: Record<string, SubagentSpeedTier>;
     tools?: Partial<Record<SubscriptionTool, boolean>>;
     /** Claude only: overrides the plugin config's `claudePromptCacheTtl`; absent follows config. */
     promptCacheTtl?: PromptCacheTtlSetting;
+    /** Antigravity only: opt-in toggle; absent or false keeps the provider disabled by default. */
+    enabled?: boolean;
 }
 export declare function validatePreferences(provider: ProviderId, input: unknown): ProviderPreferences;
 /** Durable user preferences, independent of expiring discovery caches. */
@@ -52,7 +57,9 @@ export declare class ProviderSettingsStore {
     get(provider: ProviderId): ProviderPreferences;
     visible(provider: ProviderId, model: string): boolean;
     modelName(provider: ProviderId, model: string, fallback: string): string;
-    contextWindow(model: string): number | undefined;
+    contextWindow(provider: ProviderId, model: string): number | undefined;
+    /** Provider-wide local budget preferences, read without cloning all accounts. */
+    codexDefaultBudget(field: 'contextWindow' | 'defaultMaxTokens'): number | undefined;
     /** Read on every request so saved changes apply to the next subagent request. */
     subagentSpeed(model: string): SubagentSpeedTier;
     /** The Settings-page Claude cache TTL; undefined follows the plugin config. Read per request, so no clone. */
@@ -65,7 +72,11 @@ export declare class ProviderSettingsStore {
      * @returns the configured URL, or undefined.
      */
     accountProxy(provider: ProviderId, account: string): string | undefined;
+    /** Antigravity is opt-in (disabled by default); every other provider stays enabled. */
+    providerEnabled(provider: ProviderId): boolean;
     /** Creation-time policy survives restarts and never changes an existing session. */
     toolEnabled(provider: ProviderId, tool: SubscriptionTool, createdAt?: number): boolean;
+    private persist;
+    setProviderEnabled(provider: ProviderId, enabled: boolean): Promise<void>;
     set(provider: ProviderId, input: unknown): Promise<void>;
 }

@@ -8,6 +8,8 @@ interface Props {
     t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string;
     /** Freeze the editor while the owning dialog submits. */
     disabled?: boolean;
+    /** The owning dialog's Codex global draft; null follows the catalog maximum. */
+    globalContextWindow?: number | null;
     /** Reports whether the draft differs from the loaded catalog. */
     onDirtyChange?: (dirty: boolean) => void;
 }

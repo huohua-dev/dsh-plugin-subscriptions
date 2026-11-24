@@ -85,5 +85,12 @@ export declare class PoolUsageTracker {
     /** Score one member against a snapshot's windows. */
     private score;
 }
+/**
+ * Whether a window constrains this model: unscoped windows always do; a
+ * model-scoped window (Claude's Opus/Sonnet lanes) applies when its scope
+ * names the model family. An exact Antigravity scope cannot claim a longer
+ * model ID. Used by the router and the usage tracker so both agree.
+ */
+export declare function windowApplies(window: Pick<UsageWindow, 'scope' | 'scopeExact'>, model: string, provider: ProviderId): boolean;
 /** Dimensionless urgency for the opt-in strategy. Missing timing adds no reset bonus. */
 export declare function normalizedWindowUrgency(window: UsageWindow, now: number): number;

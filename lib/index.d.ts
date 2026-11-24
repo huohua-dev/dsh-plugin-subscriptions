@@ -44,6 +44,14 @@ export interface Config {
      */
     claudePromptCacheTtl?: PromptCacheTtl;
     /**
+     * Claude only: tool-name patterns sent with `defer_loading: true`, with the
+     * server-side tool search tool added, so the model loads those definitions
+     * on demand instead of carrying them in every request. A pattern is a
+     * literal name or a prefix ending in `*` (`mcp__*`). Default empty: the
+     * request body is unchanged.
+     */
+    claudeDeferTools?: string[];
+    /**
      * Muse Code only. Muse sometimes ends a turn right after a progress sentence
      * that announces its next action ("now running the three variants:") without
      * making the tool call, so the harness stops and waits for you to type

@@ -102,7 +102,7 @@ export declare const GROK_MODELS_URL = "https://api.x.ai/v1/models";
  */
 export declare const GROK_CLI_MODELS_URL = "https://cli-chat-proxy.grok.com/v1/models";
 /** Per-model metadata the CLI catalog contributes to a discovered model. */
-type GrokCliModelMeta = Partial<Pick<DiscoveredModel, 'name' | 'description' | 'contextWindow' | 'reasoning'>>;
+type GrokCliModelMeta = Partial<Pick<DiscoveredModel, 'name' | 'description' | 'contextWindow' | 'contextWindowOptions' | 'reasoning'>>;
 /**
  * Fetch the CLI catalog and index its per-model metadata by model id.
  * @param session - the stored session (used as-is; never refreshed here).
@@ -161,6 +161,12 @@ export interface GrokAdapterOptions {
      * the provider's own default.
      */
     defaultEffortOf?: (model: string) => string | undefined;
+    /**
+     * Per-model requested context window (the Settings page's picker). Returns
+     * the user-selected number of tokens, or undefined to follow the provider's
+     * advertised default.
+     */
+    contextWindowOf?: (model: string) => number | undefined;
     /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
     rateLimit?: RateLimitWait;
 }
@@ -203,9 +209,21 @@ export declare class GrokAdapter extends LlmAdapter {
      * before provider I/O.
      */
     private discovered;
+    /**
+     * The advertised default window, the largest selectable tier, and the tiers
+     * themselves for one model (optionally scoped to one account). The tiers
+     * come from the live CLI catalog; an absent list means the advertised
+     * default is the only choice, so a user override can only shrink the budget
+     * in that case.
+     */
+    contextLimits(model: string, account?: string): Promise<{
+        default: number;
+        max: number;
+        options?: number[];
+    }>;
     resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     /** Capability resolution of the provider's own models (the pool resolves members here). */
-    resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
+    resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo>;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     /** Pool seam: stream through one specific account instead of the default. */
     streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk>;

@@ -1,8 +1,11 @@
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client';
+import type { ProviderId } from '../auth/store.js';
+import type { TrackedProvider } from '../usage/constants.js';
 import type { SubscriptionsKey } from './locales.js';
 export { callSubscriptionsAuth } from './subscriptions-rpc.js';
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'muse';
+export type SubscriptionProvider = ProviderId;
+export type UsageProvider = TrackedProvider;
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
     key: string;
@@ -16,6 +19,8 @@ export interface ProviderStatus {
     /** Picker selection; absent follows discovery, [] hides all model quotas. */
     visibleModels?: string[];
     displayName?: string;
+    /** False when the provider is disabled by default and requires manual opt-in. */
+    enabled?: boolean;
     busy: boolean;
     accounts: AccountStatus[];
     /** Device-flow code the live attempt waits on, for the code card. */
@@ -112,7 +117,23 @@ export interface SubscriptionsSectionInjected {
  * Props delivered by the slot outlet: the inject face spread flat (the
  * renderer erases the share boundary at the render call).
  */
-export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>;
+export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected> & {
+    /** Omit the pointer to the sidebar Usage page when already hosted inside it. */
+    hideUsageHint?: boolean;
+    /** Expand section max-width comfortably when rendered inside the full-width sidebar page. */
+    embedded?: boolean;
+};
+/** Whether a provider is currently disabled via the opt-in gate (Antigravity defaults to false). */
+export declare function isProviderDisabled(status: ProviderStatus | undefined): boolean;
+/** Sort the visible provider names within connected, disconnected, and disabled groups. */
+export declare function sortedSubscriptionProviders(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>): {
+    id: SubscriptionProvider;
+    name: string;
+}[];
+/** Persistent risk & availability banner shown inside the Google Antigravity panel. */
+export declare function AntigravityRiskNotice({ t }: {
+    t: SubscriptionsSectionInjected['t'];
+}): import("react").JSX.Element;
 /** A device-flow code the page shows while the attempt waits for it. */
 export interface PendingDeviceCode {
     /** Short code the user types at (or confirms on) the verification page. */

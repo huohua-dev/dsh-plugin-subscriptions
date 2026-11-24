@@ -39,6 +39,8 @@ export interface DeviceAttempt {
  */
 export declare class DeviceFlowManager {
     private attempts;
+    /** Hold the provider slot during the initial request and its retries. */
+    private starting;
     /**
      * Whether a device-flow attempt is running for one provider.
      * @param provider - the provider route.
@@ -60,4 +62,5 @@ export declare class DeviceFlowManager {
      * @throws when an attempt is already running or the device-code request fails.
      */
     start(provider: string, spec: DeviceFlowSpec): Promise<DeviceAttempt>;
+    private startAttempt;
 }

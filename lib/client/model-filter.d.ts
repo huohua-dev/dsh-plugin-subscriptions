@@ -57,3 +57,38 @@ export declare function modelEditorState(input: {
     matched: number;
     accounts: readonly AccountCatalogRow[];
 }): ModelEditorState;
+/** Compact window label for the model editor: 500000 → `500K`, 1000000 → `1M`. */
+export declare function formatWindowLabel(tokens: number | undefined): string;
+/** The catalog tiers a window picker offers for one model, default tier excluded. */
+export declare function contextWindowTiers(model: {
+    defaultContextWindow?: number;
+    contextWindowOptions?: readonly number[];
+}): number[];
+/**
+ * Select state for one model's window picker.
+ *
+ * `value` is what the `<select>` should show: `''` for follow-provider,
+ * otherwise the saved tier. `unavailable` is set when a saved tier is no
+ * longer offered, so the picker can keep showing (disabled) what the user
+ * saved instead of silently rewriting the preference (issue #149).
+ */
+export declare function contextWindowChoice(saved: string, model: {
+    defaultContextWindow?: number;
+    contextWindowOptions?: readonly number[];
+}): {
+    value: string;
+    tiers: number[];
+    unavailable?: number;
+};
+/**
+ * Overrides to persist for one save.
+ *
+ * An explicit value equal to the advertised default is the same choice as
+ * following the provider, so it is dropped instead of stored as a pinned
+ * override. Keeping such a key would display "follow provider" while the
+ * pinned value survives a later default increase (Codex review on #213).
+ */
+export declare function pruneDefaultContextOverrides(windows: Readonly<Record<string, number>>, models: readonly {
+    id: string;
+    defaultContextWindow?: number;
+}[]): Record<string, number>;

@@ -75,6 +75,8 @@ export declare function ensureConnectAttemptTimeout(minMs?: number): number;
 export declare function restoreConnectAttemptTimeout(previous: number): void;
 /** Absolute path of the proxy config file. */
 export declare function proxyFilePath(): string;
+/** The message of a thrown value, for warnings and error results. */
+export declare function errorMessage(error: unknown): string;
 /**
  * Flatten a fetch failure into a readable message: undici wraps the true
  * cause (`connect ECONNREFUSED ...`) behind a bare "fetch failed", so walk

@@ -282,6 +282,12 @@ export interface DiscoveredModel {
      * catalog reports input-only limits that the adapter converts on resolve.
      */
     contextWindow?: number;
+    /**
+     * Selectable context-window tiers the provider advertises, ascending and
+     * deduplicated. Present only when the catalog offers more than one tier, so
+     * an absent list means the advertised `contextWindow` is the only choice.
+     */
+    contextWindowOptions?: number[];
     /** Server-advertised per-request output token ceiling, when disclosed. */
     maxOutputTokens?: number;
     /** Copilot-specific: the prompt (input) cap enforced apart from the total window. */

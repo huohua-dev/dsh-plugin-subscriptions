@@ -6,7 +6,7 @@ type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => st
 export declare function quotaPercent(used: unknown, mode: QuotaDisplayMode): number | undefined;
 /** Group a reported credit balance without inventing a currency conversion. */
 export declare function formatCreditBalance(value: string): string;
-/** Display line for a disclosed Codex credit balance; undefined when absent. */
+/** Display line for a disclosed positive Codex credit balance; undefined when absent or non-positive. */
 export declare function creditBalanceText(credits: CreditBalance | undefined, t: Translate): string | undefined;
 export declare function quotaText(used: unknown, mode: QuotaDisplayMode, t: Translate): string;
 export declare function quotaIsStale(usage: ProviderUsage, now?: number): boolean;

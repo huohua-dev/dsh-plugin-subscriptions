@@ -9,8 +9,8 @@ import type { FlowSpec } from '../auth/oauth-flow.js';
 import type { ClaudeSession } from '../auth/store.js';
 import type { PoolAdapter } from './pool.js';
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
-import type { TranslatableMessage } from '../translate/resolved.js';
-import type { PromptCacheTtl } from '../translate/anthropic.js';
+import type { HostPathMapper, ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js';
+import type { PromptCacheTtl, ThinkingBinding } from '../translate/anthropic.js';
 export { CLAUDE_ENTRYPOINT, applyClaudeCodeIdentity, claudeBetaFlags, claudeBillingHeader, claudeCliUserAgent, claudeFakeUserId, claudeRequestHeaders, claudeStainlessHeaders, } from './claude-identity.js';
 import { AccountTokenManager } from './accounts.js';
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage } from './common.js';
@@ -165,6 +165,8 @@ export interface ClaudeAdapterOptions {
     rateLimit?: RateLimitWait;
     /** Resolve the attachment service per request; absent means image requests fail loudly. */
     resolveAttachments?: () => AttachmentStore | undefined;
+    /** Resolve the filesystem's host-path mapping per request, so offloaded images keep a readable path. */
+    resolveHostPathMapper?: () => HostPathMapper | undefined;
     /** Durable catalog store seeding capability metadata across restarts. */
     catalogStore?: CatalogPersistence;
     onCatalogChanged?: () => void;
@@ -184,7 +186,24 @@ export interface ClaudeAdapterOptions {
      * the next turn without a restart; undefined falls back to `promptCacheTtl`.
      */
     promptCacheTtlOverride?: () => PromptCacheTtl | undefined;
+    /**
+     * Tool-name patterns sent with `defer_loading: true`, with the server-side
+     * tool search tool added. Empty or absent keeps the request body exactly as
+     * it was before this option existed. A function so a caller may supply a live
+     * value; `apply` passes the configured list, which changes with a config reload.
+     */
+    deferToolPatterns?: () => readonly string[];
 }
+/**
+ * Anthropic rejects any image edge over 2000px once a request carries many
+ * images, and every later turn resends the history, so one oversized
+ * screenshot would fail the session for good (#110). Images are sent within
+ * this cap; 3.75MB encoded stays under the 5MB base64 per-image limit.
+ * Images over 1MB are re-encoded at their own size too: a lossless 2–4MB
+ * screenshot would otherwise let only five or six images fit the request
+ * image budget below before older ones are offloaded.
+ */
+export declare const CLAUDE_IMAGE_LIMIT: ImageRequestLimit;
 /**
  * Inline image data a Claude request may carry, in base64 bytes. Every turn
  * resends the history, so screenshots accumulate until the request passes the
@@ -193,6 +212,35 @@ export interface ClaudeAdapterOptions {
  * images to text and retries; the remaining 12MB holds prompts, tools, and text.
  */
 export declare const CLAUDE_REQUEST_IMAGE_BUDGET: number;
+/**
+ * Beta that lets a request choose what happens to a replayed thinking block
+ * whose prefix no longer matches, and makes the API report every dropped
+ * block in `input_transformations`. Claude Code sends it.
+ * https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#preserved-thinking-controls
+ */
+export declare const CLAUDE_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01";
+/**
+ * Whether a model checks a replayed thinking block's prefix: Claude 5.1 and
+ * later. Ids spell the version as `-<major>-<minor>` (`claude-opus-5-5`,
+ * `claude-fable-5-1`); a bare major (`claude-opus-5`) or a date suffix is x.0.
+ */
+export declare function checksThinkingPrefix(model: string): boolean;
+/**
+ * The request's `thinking` parameter with `block_binding` set to drop, not
+ * reject, a replayed block that no longer matches its prefix.
+ *
+ * The plugin only replays blocks whose recorded prefix still matches, so this
+ * is a backstop for a mismatch it cannot see. Accounts created on or after
+ * 2026-08-31 otherwise get an HTTP 400 for it. It is sent only to models that
+ * run the check ({@link checksThinkingPrefix}), only alongside
+ * {@link CLAUDE_THINKING_BINDING_BETA} (without which the API rejects the
+ * field), and only on adaptive thinking, which Sonnet and Haiku 5.5 require
+ * for it.
+ * @param model - the concrete model.
+ * @param thinking - the thinking parameter the model takes, if any.
+ * @returns the parameter to send.
+ */
+export declare function withThinkingBinding(model: string, thinking: Record<string, unknown> | undefined): Record<string, unknown> | undefined;
 /**
  * Assemble the Anthropic request body.
  *
@@ -210,12 +258,24 @@ export declare const CLAUDE_REQUEST_IMAGE_BUDGET: number;
  * @param effort - the reasoning effort, when the model advertises efforts.
  * @param cacheTtl - lifetime of the conversation cache breakpoints; defaults to
  * five minutes. The tools+system anchor is always 1h, as Claude Code sends it.
+ * @param deferToolPatterns - tool-name patterns to send deferred.
  * Requests that carry a `purpose` (compaction, session titles) always use five
  * minutes to preserve their existing auxiliary-request behavior. A five-minute
  * mark can still read an entry a one-hour mark wrote.
  * @returns the JSON body to POST.
  */
-export declare function claudeRequestBody(options: GenerateOptions<string>, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string, cacheTtl?: PromptCacheTtl): Record<string, unknown>;
+export declare function claudeRequestBody(options: GenerateOptions<string>, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string, cacheTtl?: PromptCacheTtl, deferToolPatterns?: readonly string[]): Record<string, unknown>;
+/**
+ * {@link claudeRequestBody} plus the binding the response to it must record.
+ * @param replayThinking - false sends no replayed thinking (the fallback after
+ * the API refused a replayed block).
+ * @param deferToolPatterns - tool-name patterns to send deferred (see {@link toAnthropicToolsDeferred}); empty keeps the body unchanged.
+ */
+export declare function claudeRequest(options: GenerateOptions<string>, messages: readonly TranslatableMessage[], maxTokens: number, thinking?: Record<string, unknown>, effort?: string, cacheTtl?: PromptCacheTtl, replayThinking?: boolean, deferToolPatterns?: readonly string[]): {
+    body: Record<string, unknown>;
+    binding: ThinkingBinding;
+    replayedThinking: number;
+};
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 export declare class ClaudeAdapter extends LlmAdapter {
     private readonly options;
@@ -251,7 +311,7 @@ export declare class ClaudeAdapter extends LlmAdapter {
     /** Capability resolution of the provider's own models (the pool resolves members here). */
     resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo>;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
-    /** Pool seam: stream through one specific account instead of the default. */
+    /** Pool seam: the caller binds replay to the concrete account before streaming. */
     streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk>;
     private streamCore;
     /**
@@ -262,5 +322,6 @@ export declare class ClaudeAdapter extends LlmAdapter {
      * ran.
      */
     private thinkingParam;
+    private failure;
     private request;
 }

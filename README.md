@@ -46,13 +46,13 @@ Subagents have a separate per-model default: **Settings → Subscriptions → Ch
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-The composer's stats row gains a **subscription usage** pill showing quota information for the provider of the session's current model (Codex for a Codex model, Grok for a Grok model, and so on). It shows at most one provider: when switching to a non-subscription model, it keeps the most recent subscription selected in the mounted conversation view, or stays hidden if there is none. This recent-model history is not persisted across page reloads. Click the pill to expand every logged-in provider and account — the default account is starred, and the current provider is listed first. Antigravity previews only the current model's windows (at most two per account); the other model windows remain available in a closed disclosure.
+The composer's stats row gains a **subscription usage** pill showing quota information for the provider of the session's current model (Codex for a Codex model, Grok for a Grok model, and so on). It shows at most one provider, and only while a subscription model is selected: switching to an official or bring-your-own-key model hides the pill instead of leaving the previous subscription on screen. A model the shell cannot read yet keeps the current selection, so the pill does not flicker between polls. Nothing about this survives a page reload. Click the pill to expand every logged-in provider and account — the default account is starred, and the current provider is listed first. Antigravity previews only the current model's windows (at most two per account); the other model windows remain available in a closed disclosure.
 
-**Settings → Subscriptions → Status-bar quota display** selects **Current / most recent subscription only** (default) or **Hidden**. The display preference is saved in the current browser, applies immediately, survives reloads, and synchronizes between tabs of the same origin. It does not hide usage details in Settings, change model selection, or change account routing.
+**Settings → Subscriptions → Status-bar quota display** selects **Current subscription only** (default) or **Hidden**. The display preference is saved in the current browser, applies immediately, survives reloads, and synchronizes between tabs of the same origin. It does not hide usage details in Settings, change model selection, or change account routing.
 
 **Quota percentages** independently selects **Used (default)** or **Remaining** for Settings, the composer/status-bar pill, and its expanded account rows. Both preferences are browser-local and synchronize across tabs. Bars fill in the selected direction, while warning colors still indicate high **used** quota (80% warning, 95% critical). Unknown or invalid telemetry stays unknown, never 100% remaining; passed reset times retain the last reported value until a refresh.
 
-For multiple accounts, the compact pill says e.g. “Codex · 2 signed-in accounts”; expand it for each account's windows, model scopes and reset times. Percentages are never added or averaged. Signed-in accounts need not be members of the selected model's pool. A single-account readout labels the default/listed account; neither a default star nor session affinity proves which account successfully served a request.
+The compact pill is deliberately narrow: a single account reads as the provider name and up to two percentages, e.g. “Codex · 13% used / 25% used”, with the 5-hour limit first and the weekly limit second. Window names, the stale note, remaining windows and Codex credits all live in the dialog the pill opens, whose account rows still star the configured default. For multiple accounts the pill says e.g. “Codex · 2 signed-in accounts”; expand it for each account's windows, model scopes and reset times. Percentages are never added or averaged. Signed-in accounts need not be members of the selected model's pool, and neither a default star nor session affinity proves which account successfully served a request.
 
 Expanded details and Settings show the last successful fetch time, stale status and the next permitted retry after a failed refresh, when known. Unsupported quota queries, empty results, and failed queries without a previous snapshot have distinct messages. If an older backend omits quota timestamps, the UI shows when it received the response and explicitly says the quota update time was not provided; receipt time never proves that upstream quota was refreshed. Clicking the account Refresh button requests `force: true`, but endpoint failure cooldowns still apply. Opening the badge rereads normally, not forcibly. Existing snapshots survive failures without being relabeled fresh; the endpoint cooldown remains intact. Open Settings and badges share successful usage reads in connection-local memory and reread that memory on focus, without additional upstream requests. This does not poll the server cache on focus; normal badge polling and manual refresh retain their existing behavior. The preference never changes internal `usedPercent`, account selection, exhaustion protection or cooldowns. Pool membership and successful-serving-account telemetry remain separate follow-ups to [#202](https://github.com/V1ki/dsh-plugin-subscriptions/issues/202). Antigravity summary endpoints/grouping in #182, #184 and #187 are not incorporated here.
 
@@ -69,6 +69,19 @@ Its `provider` parameter picks the image backend — the same prompt through GPT
 The `video_generate` tool plays the generated clip inline:
 
 ![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
+
+## Usage Dashboard & token history
+
+Open **Subscriptions** from the DSH sidebar to view the unified page with **Usage** (default) and **Settings** tabs (older hosts without sidebar panels keep **Settings → Subscriptions** unchanged). The Usage Dashboard aggregates tracked input, output, cache-read, and cache-write tokens across **Codex**, **Claude**, **Grok**, **Antigravity**, and **Muse Code** — filterable by provider, account (including signed-out historical accounts), and time range (`7D`, `30D`, `90D`, `All`). Reasoning tokens, when reported, are part of output and never double-counted; overlapping 5-hour and weekly quota windows are deduplicated in daily and KPI totals. Copilot is not tracked.
+
+- **Overview & trends**: KPI summary cards, a **26-week UTC calendar heatmap** (click any day cell to inspect its per-model and per-provider breakdown), a daily stacked token trend chart, and a ranked **By Model / By Provider** distribution view.
+- **Quota cycles**: a dual-axis combo chart comparing each 5-hour or weekly cycle's token consumption (bars) against its observed quota utilization percentage (line, with peak markers and gap breaks when quota `%` was not observed), plus quick pills for active cycles and an inline cycle inspector.
+
+![Sidebar Subscriptions Usage Dashboard with KPIs, 26-week heatmap, daily trend, and model distribution](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-dashboard.png)
+
+![Quota Cycles dual-axis combo chart comparing cycle tokens and quota utilization percentage](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
+
+The plugin saves aggregate counts, cycle quota percentages, and window metadata locally under `~/.dsh/plugins/subscriptions/usage/` (mode `0600`); it does not store prompts, credentials, or per-request logs there. **Clear history** removes this plugin's local usage history for a selected provider or all providers without affecting DSH sessions, accounts, or live quota. Opening the dashboard makes no extra quota requests and does not estimate cost.
 
 ## Providers
 
@@ -182,6 +195,8 @@ Either way, restart `dsh web` afterwards so the new version loads.
 2. Settings → **Subscriptions**: click **Connect** on a provider. For Claude, credentials are imported instantly if you have run `claude` and logged in at least once; without them, Claude authorizes in the browser like the others. For Codex, Grok, and Antigravity, authorize in the opened browser tab; Copilot shows a GitHub device code to enter at `github.com/login/device`; Muse Code shows a code to confirm on the opened `auth.meta.com` page; if a browser flow can't complete (headless host), expand the manual fallback and paste the callback URL or code.
 3. In any session, open the model picker (`/model`) and choose a model under **ChatGPT (Codex)** / **Claude (Subscription)** / **Grok (Subscription)** / **GitHub Copilot** / **Google Antigravity** / **Muse Code (Meta)**.
 
+> **Note on Google Antigravity:** Antigravity is off by default even with saved accounts, due to account-suspension risk from private endpoints and upstream HTTP 429 rejections of DSH chat requests. Credentials and preferences are kept locally. You can opt in from **Settings → Subscriptions** after acknowledging the risk. Opting in does not guarantee that Google will accept model requests.
+
 Not logged in? The provider stays out of the picker, and requests fail with `MISSING_CREDENTIAL` pointing at the Settings page; nothing else breaks.
 
 ### Multiple accounts
@@ -192,7 +207,9 @@ Every provider accepts several accounts: once one is connected, the card grows a
 
 Open **Settings → Subscriptions → provider → Edit model list**, search and select models, then **Save changes**. All discovered models are shown automatically by default. Selecting individual models, selecting all, or clearing the selection saves an explicit list; newly discovered models then stay hidden until selected. Enable automatic display again to restore discovery-driven visibility. Hidden models remain usable by existing sessions, and the editor retains the full catalog so they can be restored. Refreshing discovery preserves preferences. The dialog has one **Save changes** / **Cancel** pair: Save submits the model list together with the account settings above it, and Cancel discards both and closes the dialog.
 
-Codex models also accept a context budget in tokens. The plugin reads each account's `context_window` (standard) and `max_context_window` (maximum). Both are input-token limits, so the plugin adds the 128K output reservation to express them as DSH's combined window: the GPT-5 family's 272K/872K become 400K/1M. A blank field uses the account's maximum. Enter a smaller value, such as the standard window, to compact earlier; requests above the standard window may consume more plan quota. A requested budget is capped at that account's maximum, and the standard window is the ceiling when no maximum is advertised. Account pools resolve each member separately and use the smallest window. This changes DSH's local history budget and compaction timing, without sending an API capacity override. Longer contexts can increase response latency.
+Codex has provider-wide **Default context window** and **Default output reservation** settings, plus a per-model context override. The plugin adds the effective local output reservation (8,192 tokens by default; an explicit model `maxTokens` takes precedence) to the catalog's input-only `context_window` and `max_context_window`, because DSH subtracts that reservation before budgeting history. A per-model window overrides the provider-wide setting; leaving both blank uses the account's maximum combined window. An absent catalog maximum keeps the standard limit. Pools resolve each account separately and use the smallest window. These settings affect local compaction, not the API's capacity or generation limit. Longer histories may increase latency and quota usage.
+
+Grok models whose catalog publishes a `context_windows` tier list offer a window picker instead: keep **Follow provider** for the advertised default (currently 256K) or pick a tier such as **500K**. The plugin reads the tiers from the Grok CLI catalog, caps the choice at the largest advertised tier, keeps the advertised default when the catalog offers no list, and shows a still-saved tier as unavailable instead of silently dropping it after a refresh stops offering it. Like the Codex field above, this only changes DSH's local history budget and compaction timing; it does not raise the API's own capacity, and the provider decides how a larger window is billed. New sessions pick up the updated window immediately; existing sessions apply it on the next message.
 
 The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
 
@@ -214,10 +231,11 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
   config:
-    providers: [codex, claude]        # subset; default all five
+    providers: [codex, claude]        # subset; all six registered by default, Antigravity is opt-in
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
     museAutoContinue: true             # Muse: ask the model once when it stops after announcing a step (default on)
+    claudeDeferTools: []               # Claude: tool-name patterns sent deferred (see below); empty = unchanged request
     rateLimit:
       wait: false                      # default: no hours-long rate-limit waits
       maxWaitMs: 21600000              # opt-in wait ceiling; QUOTA never auto-retries
@@ -229,6 +247,20 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
 ```
 
 `museAutoContinue` (default `true`) controls the Muse early-stop safeguard described under Muse Code below: set it to `false` to get the model's replies exactly as it ends them.
+
+`claudeDeferTools` lists tool names (or prefixes ending in `*`, for example `mcp__*`) whose definitions the Claude route sends with
+`defer_loading: true`. When at least one tool is deferred, the route also adds Anthropic's server-side tool search tool
+(`tool_search_tool_regex_20251119`), so the model loads a deferred definition only when it needs it. This shrinks the tool
+definitions every request carries: in the verification in [`docs/claude-deferred-tools-verification.md`](docs/claude-deferred-tools-verification.md)
+30 tools of about 600 tokens each went from 18,658 to 713 input tokens. The default is empty and then the request is
+byte-identical to earlier releases. The first turn in which the set of deferred tools becomes non-empty (or empty again) changes `tools`, which
+Anthropic documents as invalidating the cache once; later turns keep the cache. A pattern is a literal name or a prefix with one trailing `*`; it is never a regular
+expression. If DSH core ever passes a tool marked `deferLoading` to this route, that tool is deferred too; today core removes the marker before the request reaches this plugin (the route does not declare `toolUpdate`), so the pattern list is what defers tools. Limits of the API: only models that support tool search accept it (Opus 4.1 and earlier do not; a model that rejects it answers 400, so enable the option only with
+supported models); at least one tool must stay
+loaded (the search tool counts), and a deferred tool cannot carry `cache_control` (this route never puts one on a tool; the
+tools+system mark sits on `system`). When the model runs a search inside a turn, usage is the cumulative total the endpoint reports in `message_delta`. A request with deferred tools was served from the prompt cache in the end-to-end check, and Anthropic documents that deferred tools
+leave the cached prefix untouched ([prompt caching with tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching));
+a hit rate across a long session was not measured.
 
 `claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
 It can also be changed without a restart from Settings → Subscriptions → Claude → Manage ("Prompt cache
@@ -250,6 +282,26 @@ read does not upgrade a five-minute entry's lifetime. Compaction and session-tit
 minutes to preserve their existing auxiliary-request behavior. Requests from subagents carry no marker the plugin can see, so they follow the setting
 along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
 Copilot and Antigravity use their own caching.
+
+Claude's extended thinking is replayed the way Claude Code replays it: each `thinking` block's signature (and each
+`redacted_thinking` payload) is kept with the assistant message, together with the received thinking text, and both
+are sent back unchanged, in their original position, on later requests. In a tool loop that lets the model continue
+from its earlier reasoning instead of re-deriving it after every tool result.
+
+This plugin conservatively replays thinking only to the same concrete provider, account, and model that produced
+it. Some models support cross-model thinking replay; this plugin does not enable it. History from another model,
+provider or pool member is sent without its thinking, as before, and so is reasoning stored by earlier releases.
+
+Anthropic binds each thinking block to everything before it (the `system` prompt, the set of `tools`, and earlier
+messages) and to the thinking block that preceded it; see
+[preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#prefix-check). The
+plugin records that binding with each response and sends a block back only while it still holds, so when DSH changes
+an earlier part of the request (a rewritten system prompt or tool list, a pruned tool result, a compaction summary)
+the thinking that depended on it is left out and the rest of the history is sent as usual. As a backstop, requests to
+Claude 5.1 and later models also ask the API to drop, rather than reject, a block it finds invalid
+(`block_binding: { prefix_mismatch_behavior: "drop_block" }` with the `thinking-binding-controls-2026-08-01` beta),
+and if the API still refuses a replayed block the turn is retried once without replayed thinking. Cache breakpoints
+never land on a thinking block, which Anthropic rejects.
 
 `wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
 entries keep working without it — the field exists because a configured model the live

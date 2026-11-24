@@ -84,6 +84,12 @@ export declare function fetchCodexResetCredits(session: CodexSession, fetchFn?: 
 /** Spend one banked reset. The caller must already have confirmed the credit is still available. */
 export declare function consumeCodexResetCredit(session: CodexSession, creditId: string, requestId: string, fetchFn?: FetchFn, signal?: AbortSignal): Promise<void>;
 /**
+ * Whether a reported duration approximately matches the expected window
+ * length: within ±5%, both ends included. Unit-free (seconds here, ms in the
+ * usage window tracker, which reuses it for classification).
+ */
+export declare function matchesWindow(value: number, expected: number): boolean;
+/**
  * Map the purchased-credit object from `wham/usage`. Undefined when the
  * backend omitted it, so a missing field is not reported as a zero balance.
  */
@@ -156,6 +162,8 @@ export interface CodexAdapterOptions {
      */
     defaultEffortOf?: (model: string) => string | undefined;
     contextWindowOf?: (model: string) => number | undefined;
+    defaultContextWindow?: () => number | undefined;
+    defaultMaxTokens?: () => number | undefined;
     /**
      * Per-request speed lookup (the composer Speed toggle's host half). Returns
      * whether this session's current choice sends the model on the fast tier;
@@ -249,27 +257,19 @@ export declare class CodexAdapter extends LlmAdapter {
      * Account-specific context bounds, in the host's combined (request +
      * response) tokens.
      *
-     * The `/models` `context_window` / `max_context_window` fields are INPUT
-     * limits: the GPT-5 family's 272K is its 400K window minus the 128K output
-     * reservation, and the 1M tier advertises 872K. The host reserves
-     * `defaultMaxTokens` out of `contextWindow` before it budgets history, so
-     * passing the raw figure through counted the output twice (a 272K entry left
-     * only 144K of history). The reservation is added back here, so the history
-     * budget equals exactly what the backend accepts as input.
-     *
-     * `standard` is the backend's default tier, `max` the largest window the
-     * account may opt into, and `default` the window used when the user sets no
-     * override: the maximum, because the backend accepts it on every request
-     * (Codex itself only gates it behind a config key). An absent maximum
-     * conservatively keeps the standard window. A configured static
-     * `contextWindow` is already in host units and is used verbatim.
+     * The catalog reports input-only limits. Add exactly the reserve advertised
+     * to DSH, which subtracts it out before budgeting history. An absent catalog
+     * maximum keeps the standard limit; static windows use combined tokens.
+     * `default` is the effective window without a per-model override: the
+     * provider-wide preference, capped at the account maximum, or that maximum.
      */
     contextLimits(model: string, account?: string): Promise<{
         standard: number;
         default: number;
         max: number;
     }>;
-    private contextWindowFor;
+    private outputReserve;
+    private contextLimitsFor;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     /** Pool seam: stream through one specific account instead of the default. */
     streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk>;

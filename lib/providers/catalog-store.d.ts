@@ -27,6 +27,12 @@ export declare function modelsFilePath(): string;
  */
 export declare function sanitizeSnapshot(value: unknown): CatalogSnapshot | undefined;
 /**
+ * `rename` with a short bounded retry on share-mode conflicts. Exported for
+ * the usage store, which writes its files the same way through an
+ * injectable file system, hence `renameFn`.
+ */
+export declare function renameWithRetry(from: string, to: string, renameFn?: (from: string, to: string) => Promise<void>): Promise<void>;
+/**
  * Wait for one catalog file's pending writes to settle. Stop discovery before
  * calling this for teardown; it does not cancel producers or retry failed writes.
  */

@@ -1,4 +1,5 @@
 import type { AccountPreferences, ProviderPreferences } from '../provider-settings.js';
+import type { ProviderId } from '../auth/store.js';
 export interface AccountCatalogRow {
     key: string;
     label: string;
@@ -11,9 +12,9 @@ export interface AccountCatalogRow {
 /** Missing allowlist follows discovery; explicit [] must remain empty. */
 export declare function accountPoolSelection(account: AccountPreferences, models: readonly {
     id: string;
-}[]): Set<string>;
+}[], provider?: ProviderId): Set<string>;
 /** Retain unavailable saved IDs so a temporary catalog failure cannot erase them. */
-export declare function accountModelRows(account: AccountCatalogRow, preferences: AccountPreferences): {
+export declare function accountModelRows(account: AccountCatalogRow, preferences: AccountPreferences, provider?: ProviderId): {
     unavailable: boolean;
     id: string;
     name: string;

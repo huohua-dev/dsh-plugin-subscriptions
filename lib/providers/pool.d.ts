@@ -14,6 +14,7 @@ import type { AccountAwareAdapter } from './accounts.js';
 import type { PoolDefinition, PoolMemberRef } from './pool-family.js';
 import { PoolHealthRegistry } from './pool-health.js';
 import type { PoolUsageTracker } from './pool-usage.js';
+import { type RequestEndObserver } from './replay.js';
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
 export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized';
 export interface PoolAdapterOptions {
@@ -33,6 +34,10 @@ export interface PoolAdapterOptions {
     /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
     tiers: Record<string, PoolMemberRef[]>;
     onWarn: (message: string) => void;
+    /** Excludes opted-out providers, including from explicit tiers and previously prepared calls. */
+    providerEnabled?: (provider: ProviderId) => boolean;
+    /** Usage tracking: told about every member attempt that reported usage, failed ones included. */
+    onRequestEnd?: RequestEndObserver;
 }
 export declare class PoolAdapter extends LlmAdapter {
     private readonly options;

@@ -6,7 +6,7 @@
  * base64 data.
  */
 import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message, LegacyToolResultBlock as ToolResultBlock } from '../compat.js';
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
 /** An image block with its bytes resolved to inline base64 for the wire. */
 export interface ResolvedImagePart {
     type: 'image';
@@ -46,7 +46,21 @@ export interface ImageRequestLimit {
     maxEdge: number;
     /** Encoded-byte target before base64 expansion; a larger stored image is re-encoded even within `maxEdge`. */
     maxBytes: number;
+    /**
+     * Stored size above which an image within `maxEdge` is still re-encoded at
+     * its own dimensions, and the byte target for every re-encoded image. Lossless
+     * screenshots run 2–4MB each, so without it a few of them exhaust a route's
+     * request image budget and older images are omitted. Absent means only
+     * oversized edges trigger a re-encode.
+     */
+    softBytes?: number;
 }
+/** Execution-world read path of one image, as the host's offload placeholder names it. */
+export interface ImageAccess {
+    readonlyPath: string;
+}
+/** Maps one absolute host path into the current tool execution world. */
+export type HostPathMapper = (hostPath: string) => string | undefined;
 /**
  * Failure code a host's image-offload executor answers by replacing the oldest
  * retained images with text and retrying (`IMAGE_OFFLOAD_REQUIRED_CODE` in
@@ -70,12 +84,11 @@ export declare function hostSupportsImageOffload(): boolean;
 export declare function requiredImageOffloadCount(messages: readonly TranslatableMessage[], maxBase64Bytes: number): number;
 /**
  * The request projection for one oversized image, or undefined when it fits.
- * An image over the edge cap is downscaled to it; one within the edge cap but
- * over the byte cap keeps its size and is only re-encoded (the host passes a
- * target at the source size through when the bytes already fit, and otherwise
- * walks its JPEG/WebP quality ladder). Hosts before DSH 0.1.7 read a pixel
- * budget (`maxPixels`), later ones the target edges (`width`/`height`); each
- * validates only its own fields, so one projection carries both.
+ * An image is oversized when its long edge exceeds `maxEdge`, or when its
+ * stored bytes exceed `min(maxBytes, softBytes)` (or `maxBytes` alone); the latter keeps its dimensions and is only
+ * re-encoded. Hosts before DSH 0.1.7 read a pixel budget (`maxPixels`), later
+ * ones the target edges (`width`/`height`); each validates only its own
+ * fields, so one projection carries both.
  */
 export declare function imageRequestTarget(ref: {
     width: number;
@@ -88,6 +101,14 @@ export declare function imageRequestTarget(ref: {
     maxBytes: number;
 } | undefined;
 /**
+ * Read path of one stored image for the offload placeholder, so the model can
+ * reopen an omitted image with its own tools as on the host's built-in routes.
+ * Undefined when the host predates `resolveImageAttachmentAccess`, no mapper
+ * is mounted, or the reference cannot be resolved: the placeholder then keeps
+ * its no-path wording rather than failing the request.
+ */
+export declare function offloadedImageAccess(attachments: AttachmentStore | undefined, mapHostPath: HostPathMapper | undefined, ref: ImageAttachmentRef): ImageAccess | undefined;
+/**
  * Resolve every ImageBlock's attachment reference to inline base64 bytes.
  * Messages without images pass through unchanged. A request carrying an image
  * with no attachment service available fails loudly rather than silently
@@ -97,6 +118,8 @@ export declare function imageRequestTarget(ref: {
  * @param signal - cancellation for the storage reads.
  * @param limit - the route's outgoing image cap; oversized images are sent
  *   downscaled while the stored attachment and history stay untouched.
+ * @param mapHostPath - the mounted filesystem's host-path mapping; when
+ *   present, offload placeholders name a read-only copy the model can reopen.
  * @returns the same messages with image blocks resolved for the translators.
  */
-export declare function resolveImages(messages: readonly Message[], attachments: AttachmentStore | undefined, signal?: AbortSignal, limit?: ImageRequestLimit): Promise<readonly TranslatableMessage[]>;
+export declare function resolveImages(messages: readonly Message[], attachments: AttachmentStore | undefined, signal?: AbortSignal, limit?: ImageRequestLimit, mapHostPath?: HostPathMapper): Promise<readonly TranslatableMessage[]>;

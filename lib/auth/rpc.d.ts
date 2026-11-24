@@ -13,6 +13,7 @@ import { type ProviderId } from './store.js';
 import type { ProviderUsage } from '../providers/common.js';
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js';
 import type { CliVersion } from '../providers/npm-cli-version.js';
+import { type UsageHistoryController } from '../usage/usage-rpc.js';
 /** Internal endpoint dispatcher used after the host authenticates an exact Fetch route. */
 export type SubscriptionsRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<RpcResult<unknown>>;
 /**
@@ -25,7 +26,7 @@ export declare const SUBSCRIPTIONS_AUTH_PREFIX = "subscriptions-auth.";
  * Every endpoint {@link dispatch} answers; each gets one exact Fetch route.
  * Kept in one place so the route table and the switch cannot drift apart.
  */
-export declare const SUBSCRIPTIONS_AUTH_ENDPOINTS: readonly ["providerSettings", "setProviderSettings", "status", "login", "manual", "cancel", "logout", "setDefault", "usage", "image", "video", "prepareReset", "consumeReset", "speed", "setSpeed", "proxyGet", "proxySet", "proxyTest", "accountModelsTest", "modelDefaults", "setModelDefault"];
+export declare const SUBSCRIPTIONS_AUTH_ENDPOINTS: readonly ["providerSettings", "setProviderSettings", "setProviderEnabled", "status", "login", "manual", "cancel", "logout", "setDefault", "usage", "image", "video", "prepareReset", "consumeReset", "speed", "setSpeed", "proxyGet", "proxySet", "proxyTest", "accountModelsTest", "modelDefaults", "setModelDefault", "usageDashboard", "accountUsage", "clearUsageHistory"];
 /** Decoded image bytes returned by the `image` endpoint. */
 export interface ImageBytesResult {
     mediaType: string;
@@ -70,6 +71,8 @@ export interface ProviderStatus {
     /** Saved picker visibility, attached by the status RPC from local preferences. */
     visibleModels?: string[];
     displayName?: string;
+    /** False when the provider is disabled by default and requires manual opt-in. */
+    enabled?: boolean;
     /** Whether a login attempt is currently waiting for its code. */
     busy: boolean;
     /** Logged-in accounts, default first. */
@@ -140,6 +143,10 @@ export interface ProviderSettingsController {
     displayName?(provider: ProviderId): string | undefined;
     /** Local picker selection, without triggering model discovery. */
     visibleModels?(provider: ProviderId): string[] | undefined;
+    /** Local opt-in gate (Antigravity defaults to false). */
+    enabled?(provider: ProviderId): boolean;
+    /** Persist only the opt-in gate without overwriting other provider settings. */
+    setEnabled?(provider: ProviderId, enabled: boolean): Promise<void>;
     get(provider: ProviderId, force: boolean): Promise<unknown>;
     set(provider: ProviderId, settings: unknown): Promise<void>;
     /**
@@ -237,6 +244,9 @@ export interface AuthController {
 /** Payload carried no usable provider id — an RPC client bug, not a server failure. */
 export declare class BadRequest extends Error {
 }
+/** A provider the endpoint does not serve: usage statistics for Copilot. */
+export declare class Unsupported extends Error {
+}
 /**
  * Register the `/subscriptions-auth` RPC channel when a host connection exists.
  * @param ctx - the plugin context (headless profiles have no `connection`).
@@ -244,5 +254,6 @@ export declare class BadRequest extends Error {
  * @param speed - the per-session speed-tier state backing the Speed toggle.
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
  * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
+ * @param usageHistory - optional usage reader backing `accountUsage`/`clearUsageHistory`.
  */
-export declare function registerAuthRpc(ctx: Context, controller: AuthController, speed: SpeedController, proxy?: ProxyConfigController | undefined, modelDefaults?: ModelDefaultsController | undefined, providerSettings?: ProviderSettingsController | undefined): void;
+export declare function registerAuthRpc(ctx: Context, controller: AuthController, speed: SpeedController, proxy?: ProxyConfigController | undefined, modelDefaults?: ModelDefaultsController | undefined, providerSettings?: ProviderSettingsController | undefined, usageHistory?: UsageHistoryController | undefined): void;

@@ -1,5 +1,9 @@
 /** Only concrete, explicit effort suffixes establish an Antigravity model family. */
 export declare function antigravityModelId(id: string): string;
+/** Map a retired effort selection only when its family replaces it in this account's catalog. */
+export declare function antigravitySelectionId(id: string, models: readonly {
+    id: string;
+}[]): string;
 /** Quota scopes retain concrete upstream ids; selectors use the family id. */
 export declare function sameAntigravityModel(left: string | undefined, right: string | undefined): boolean;
 export declare const ANTIGRAVITY_QUOTA_SCOPES: readonly ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"];

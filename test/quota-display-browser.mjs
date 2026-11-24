@@ -1,5 +1,5 @@
-// Optional offline UI check: PLAYWRIGHT_PATH=/path/to/playwright node test/subscription-usage-browser.mjs
-// No running DSH server, real accounts, credentials or model writes. Screenshots use the fixture theme.
+// Optional offline UI check: PLAYWRIGHT_PATH=/path/to/playwright node test/quota-display-browser.mjs
+// No running DSH server, real accounts, credentials or model writes. Set QUOTA_SCREENSHOT to capture the fixture.
 import assert from 'node:assert/strict'
 import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -11,7 +11,7 @@ const { chromium } = await import(pathToFileURL(`${process.env.PLAYWRIGHT_PATH}/
 const result = await build({
   input: 'test/subscription-usage-browser.fixture.tsx',
   resolve: { alias: { 'react-dom/client': `${packagePath('react-dom')}/client.js` } },
-  transform: { define: { 'process.env.NODE_ENV': '"production"' } },
+  transform: { define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env': '{}' } },
   plugins: [{ name: 'test-css', load(id) { return id.endsWith('.css') ? 'export default {}' : null } }],
   output: { format: 'iife' }, write: false,
 })
@@ -25,14 +25,14 @@ try {
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   page.setDefaultTimeout(10_000)
-  await page.goto('http://subscription-usage.test/')
-  await page.getByRole('button', { name: 'codex', exact: true }).click()
+  await page.goto('http://subscription-usage.test/?provider=codex')
   const badge = page.locator('[data-composer-stats] button')
   await badge.waitFor()
-  assert.match(await badge.innerText(), /Default account.*13% used/)
+  assert.match(await badge.innerText(), /13% used/)
+  assert.doesNotMatch(await badge.innerText(), /Default account/, 'the pill leaves the account label to the dialog')
   await page.getByRole('button', { name: 'Toggle settings', exact: true }).click()
   const settings = page.locator('[data-settings]')
-  const codex = settings.getByText('Codex (ChatGPT)', { exact: true }).locator('xpath=../..')
+  const codex = settings.getByRole('tabpanel').filter({ hasText: 'Codex (ChatGPT)' })
   await codex.getByText('13% used', { exact: true }).waitFor()
   const mode = settings.getByRole('combobox', { name: 'Quota percentages', exact: true })
   const calls = () => page.evaluate(() => Number(document.documentElement.dataset.usageCalls))
@@ -62,14 +62,13 @@ try {
   assert.match(await fill('20% remaining').getAttribute('style'), /width: 20%;.*warn/)
   await badge.click()
   await codexPanel.getByText('0% remaining', { exact: true }).waitFor()
-  await page.screenshot({ path: '/tmp/subscriptions-183-boundaries.png', fullPage: true })
-  assert.match(await panel.getByRole('status').innerText(), /100% used \/ 0% remaining/)
+  assert.match(await panel.getByRole('status').innerText(), /exhausted subscription window/)
   assert.match(await codexPanel.getByText('5% remaining', { exact: true }).locator('xpath=following-sibling::div[1]/div').getAttribute('style'), /width: 5%;.*error/)
   await page.keyboard.press('Escape')
   await update('Unknown usage', 'Unknown quota')
   assert.equal(await codex.getByText('100% remaining', { exact: true }).count(), 0)
   await update('Stale usage', '72% remaining')
-  assert.match(await badge.innerText(), /stale/)
+  assert.doesNotMatch(await badge.innerText(), /stale/, 'the pill leaves the freshness note to the dialog')
   assert.match(await codex.innerText(), /Reset time passed; awaiting refresh/)
   await page.setViewportSize({ width: 360, height: 720 })
   await badge.click()
@@ -79,7 +78,8 @@ try {
   await page.setViewportSize({ width: 900, height: 900 })
   await page.getByRole('button', { name: 'Fail Codex usage', exact: true }).click()
   await codex.getByText(/Last known usage; refresh unavailable/).waitFor()
-  assert.match(await badge.innerText(), /72% remaining.*stale/)
+  assert.match(await badge.innerText(), /72% remaining/)
+  assert.doesNotMatch(await badge.innerText(), /stale/)
   const priorFocus = await calls()
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
   assert.equal(await calls(), priorFocus, 'focus uses only existing shared memory')
@@ -104,7 +104,6 @@ try {
   await page.getByRole('combobox', { name: '额度百分比', exact: true }).waitFor()
   await page.setViewportSize({ width: 360, height: 720 })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
-  await page.getByRole('button', { name: 'codex', exact: true }).click()
   await badge.waitFor()
   await badge.click()
   const chinesePanel = page.getByRole('dialog', { name: '订阅用量', exact: true })
@@ -112,7 +111,7 @@ try {
   const bounds = await chinesePanel.boundingBox()
   assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 360)
   assert.equal(await chinesePanel.evaluate(element => element.scrollWidth <= element.clientWidth), true)
-  await page.screenshot({ path: process.env.QUOTA_SCREENSHOT || '/tmp/subscriptions-183-quota.png', fullPage: true })
+  if (process.env.QUOTA_SCREENSHOT) await page.screenshot({ path: process.env.QUOTA_SCREENSHOT, fullPage: true })
   assert.deepEqual(errors, [])
   console.log('PASS: settings/badge/details, direction/colors, boundaries/unknown, stale/failure/recovery, cache-only focus, cross-tab persistence, independent hiding, Chinese and narrow layout')
 } finally { await browser.close() }

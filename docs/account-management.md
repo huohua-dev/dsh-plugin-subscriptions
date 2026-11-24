@@ -21,6 +21,8 @@
 - **结果可核对**：成功时显示模型数量、耗时和实际走的线路（账号代理 / DSH 网络设置）；失败时显示具体原因（例如 `connect ECONNREFUSED`）。
 - 令牌过期会在测试时按正常流程刷新一次，所以“代理不通”和“登录失效”会给出不同的错误。
 
+Antigravity 的账号池白名单按模型分组管理，推理档位由模型选择器单独控制。旧版保存的 `-low`、`-medium`、`-high`、`-xhigh` 条目，只有在该账号的当前目录已用对应分组替代具体条目时才按分组匹配；仍存在的手动具体模型和未知 ID 保持原样，`-tiered` 不作猜测映射。读取不会改写配置，编辑器会显示对应分组，取消勾选并保存后不会被旧条目重新启用。该兼容处理不保留旧条目的推理档位限制，也不会修改默认推理档位。
+
 ## 工作与个人账号示例
 
 | 账号 | 别名 | 加入自动 Pool | 独立模型入口 |
@@ -41,6 +43,8 @@
 Open **Settings → Subscriptions → provider → Manage** to edit account aliases, automatic-pool participation, per-account pool model allowlists, independent model entries, and a per-account proxy.
 
 Existing accounts default to participating in the pool, with independent entries disabled. An absent model allowlist follows all discovered models, including future additions; an empty allowlist permits none. Independent entries bind a stable account key, not its editable alias, and do not fall back to another account when unavailable.
+
+Antigravity allowlists select model families; reasoning effort is controlled separately in the model picker. Legacy `-low`, `-medium`, `-high`, and `-xhigh` selections match their family only when that account's current catalog replaces the concrete entry with the family. Still-listed manual concrete models and unknown IDs stay exact; `-tiered` aliases are not guessed. Reads do not rewrite saved settings. The editor shows the corresponding family, and unchecking it removes the legacy selections on save. This compatibility mapping does not preserve an old effort restriction or change the default reasoning effort.
 
 The per-account **Proxy** field is a plain-text URL (`socks5://user:pass@host:port`, `socks5h://…`, `http://…`, `https://…`) shown and stored as typed, credentials included. Blank means the account follows the plugin-wide proxy. A configured proxy covers every request of that account — model calls, token refresh, usage lookups, model discovery and its tool calls — and is not subject to the plugin-wide bypass list. An unreachable proxy fails the request instead of silently going direct.
 

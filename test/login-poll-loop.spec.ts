@@ -14,10 +14,12 @@
  * here without React and without an RPC channel.
  */
 
+import './css-hook.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { attemptSettled, pendingDeviceCode } from '../src/client/SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus } from '../src/client/SubscriptionsSection.js'
+
+const { attemptSettled, pendingDeviceCode } = await import('../src/client/SubscriptionsSection.js')
 
 /** A status snapshot with `count` stored accounts and the given busy flag. */
 function status(count: number, busy: boolean, detail?: string, pendingLogin?: { userCode: string; verificationUrl: string }): ProviderStatus {

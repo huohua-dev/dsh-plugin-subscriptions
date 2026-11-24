@@ -6,6 +6,7 @@ overlay.yml
 .DS_Store
 .pnpm-home/
 .pnpm-cache/
-.pnpm-store/
+.pnpm-store
+.worktrees/
 .implementation-*.log
 .implementation-dist-*/

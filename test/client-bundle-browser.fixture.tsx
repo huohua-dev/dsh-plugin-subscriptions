@@ -45,13 +45,25 @@ scope.__ModuleLoader__ = { load(def: NonNullable<typeof scope.__LOADED__>) { sco
 
 const ok = (value: unknown) => ({ ok: true, value })
 const now = Date.now()
+const totals = { totalTokens: 1_325, inputTokens: 1000, outputTokens: 300, cacheReadTokens: 25, cacheWriteTokens: 0, reasoningTokens: 10 }
+const dashboardCalls: string[] = []
 const rpc = {
-  call: async (_channel: string, method: string, payload: { provider?: string }) => {
+  call: async (_channel: string, method: string, payload: { provider?: string; range?: string }) => {
+    if (method.endsWith('.usageDashboard')) {
+      dashboardCalls.push(payload.provider ?? 'all')
+      return ok({
+        generatedAt: now, range: payload.range ?? '30d', filters: { provider: payload.provider ?? 'all', account: 'all' },
+        providers: [{ provider: 'muse', totalTokens: totals.totalTokens, accounts: [{ key: 'muse-test', loggedIn: true, isDefault: true, totalTokens: totals.totalTokens }] }],
+        summary: { ...totals, activeModels: 1, activeDays: 1, activeAccounts: 1 },
+        daily: [], heatmap: [], models: [{ ...totals, provider: 'muse', model: 'muse-fixture', share: 1 }], providerBreakdown: [],
+        activeWindows: [], quotaCycles: [], clearInfo: {}, cleared: false, trackingStartedAt: now, errors: [],
+      })
+    }
     if (method.endsWith('.status')) {
       const empty = { busy: false, accounts: [] }
       return ok({ providers: {
         codex: { busy: false, accounts: [{ key: 'codex-test', isDefault: true, account: 'me@example.com', plan: 'pro' }] },
-        claude: empty, grok: empty, copilot: empty, antigravity: empty, muse: empty,
+        claude: empty, grok: empty, copilot: empty, antigravity: { ...empty, enabled: false }, muse: empty,
       } })
     }
     if (method.endsWith('.usage')) {
@@ -101,8 +113,9 @@ const ctx = {
 }
 
 function Dock({ sessionId }: { sessionId: string }) {
+  const [showSubscriptions, setShowSubscriptions] = React.useState(false)
   const entry = (name: string, id: string) => {
-    const found = registrations.find(item => item.def.name === name && item.def.id === id)
+    const found = registrations.find(item => item.def.name === name && (item.def.id ?? item.def.key) === id)
     if (found === undefined) throw new Error(`no ${name}/${id} registration`)
     const t = ctx.locale.bind('settings.subscriptions')
     return React.createElement(found.Component, { ...found.def.inject?.(sessionId), t })
@@ -115,6 +128,8 @@ function Dock({ sessionId }: { sessionId: string }) {
       body { margin: 0; } button { font: inherit; }
       .tools { position: fixed; left: 40px; right: 40px; bottom: 44px; display: flex; justify-content: flex-end; gap: 8px; }
       .dock { position: fixed; left: 0; right: 0; bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 12px; padding-top: 4px; max-width: 100%; }`}</style>
+    <button type="button" onClick={() => setShowSubscriptions(true)}>{entry('sidebar.panellist', 'subscriptions')}Subscriptions</button>
+    {showSubscriptions && entry('main', 'subscriptions')}
     <div className="tools" data-tools>{entry('conversation.input.right', 'codex-speed')}</div>
     <div className="dock" data-composer-dock>
       <button type="button" data-sibling-pill>12 steps · 41 tok/s</button>
@@ -139,6 +154,7 @@ Object.assign(scope, {
     id: scope.__LOADED__?.id,
     requested: [...requested],
     commands,
+    dashboardCalls: [...dashboardCalls],
     registered: registrations.map(item => `${item.def.name}/${item.def.id ?? item.def.key}`),
     primitivesReads: [...primitivesReads].filter((key): key is string => typeof key === 'string'),
   }),

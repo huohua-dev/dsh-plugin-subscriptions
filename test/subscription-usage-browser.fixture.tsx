@@ -14,7 +14,9 @@ const selections = {
   grok: { provider: 'grok', model: 'grok-test' },
   antigravity: { provider: 'antigravity', model: 'gemini-model-29' },
 }
-let selection = selections.api
+// The quota-mode test starts on a Codex model; the badge test still starts on
+// a non-subscription model and drives model changes through the real poller.
+let selection = new URLSearchParams(location.search).get('provider') === 'codex' ? selections.codex : selections.api
 let visibleModels: string[] | undefined
 let failGoogleUsage = false
 let secondGoogleAccount = false

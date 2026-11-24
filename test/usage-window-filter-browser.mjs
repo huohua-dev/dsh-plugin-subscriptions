@@ -10,7 +10,8 @@ const { chromium } = await import(pathToFileURL(`${process.env.PLAYWRIGHT_PATH}/
 const result = await build({
   input: 'test/usage-window-filter-browser.fixture.tsx',
   resolve: { alias: { 'react-dom/client': `${packagePath('react-dom')}/client.js` } },
-  transform: { define: { 'process.env.NODE_ENV': '"production"' } },
+  transform: { define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env': '{}' } },
+  plugins: [{ name: 'test-css', load(id) { return id.endsWith('.css') ? 'export default {}' : null } }],
   output: { format: 'iife' }, write: false,
 })
 const code = result.output.find(file => file.type === 'chunk').code
@@ -31,10 +32,8 @@ try {
   assert.deepEqual(await rows.allTextContents(), ['Window · gemini-3-flash-high', 'Weekly · gemini-3-flash-high'])
   const dialog = page.getByRole('dialog', { name: 'Manage Google Antigravity', exact: true })
   const open = async () => {
-    // Scope to the Antigravity card: it is not the last provider card (Muse follows it).
-    const manage = page.getByRole('button', { name: 'Manage', exact: true })
-    await page.locator('div').filter({ has: page.getByText('Google Antigravity', { exact: true }) }).filter({ has: manage })
-      .last().getByRole('button', { name: 'Manage', exact: true }).click()
+    const providerPanel = page.locator('[role="tabpanel"][data-subscription-provider="antigravity"]')
+    await providerPanel.getByRole('button', { name: 'Manage', exact: true }).click()
     await dialog.getByRole('checkbox', { name: 'Gemini Flash', exact: true }).waitFor()
   }
   const save = async () => {
@@ -65,13 +64,16 @@ try {
   assert.equal(await page.getByRole('progressbar').count(), 5)
   assert.equal(await page.getByRole('region', { name: 'Claude and GPT models', exact: true }).count(), 1)
   assert.equal(await page.getByRole('region', { name: 'Gemini 4 Argon', exact: true }).count(), 1)
-  assert.equal(await page.getByText('1% used', { exact: true }).count(), 2)
-  assert.equal(await page.getByText('0% used', { exact: true }).count(), 2)
-  assert.equal(await page.getByText('33% used', { exact: true }).count(), 1)
+  // The visible quota text also includes a reset countdown; assert exact
+  // values on the corresponding, accessible progress meters instead.
+  const bars = text => page.locator(`[role="progressbar"][aria-valuetext="${text}"]`)
+  assert.equal(await bars('1% used').count(), 2)
+  assert.equal(await bars('0% used').count(), 2)
+  assert.equal(await bars('33% used').count(), 1)
   await page.getByRole('combobox', { name: 'Quota percentages', exact: true }).selectOption('remaining')
-  assert.equal(await page.getByText('99% remaining', { exact: true }).count(), 2)
-  assert.equal(await page.getByText('100% remaining', { exact: true }).count(), 2)
-  assert.equal(await page.getByText('67% remaining', { exact: true }).count(), 1)
+  assert.equal(await bars('99% remaining').count(), 2)
+  assert.equal(await bars('100% remaining').count(), 2)
+  assert.equal(await bars('67% remaining').count(), 1)
   assert.equal(await page.getByText('Weekly limit', { exact: true }).count(), 3)
   assert.equal(await page.getByText('5h limit', { exact: true }).count(), 2)
   assert.equal(await page.getByText(/tab_jump|chat_23310/).count(), 0)
@@ -83,12 +85,14 @@ try {
   await open()
   await dialog.getByRole('checkbox', { name: 'Gemini Flash', exact: true }).uncheck()
   await save()
-  await page.getByRole('region', { name: 'Gemini Models', exact: true }).waitFor({ state: 'hidden' })
-  assert.equal(await page.getByRole('region', { name: 'Gemini 4 Argon', exact: true }).count(), 0)
-  assert.equal(await page.getByRole('progressbar').count(), 2)
+  // Picker visibility filters model-scoped windows, not the provider's shared quota buckets.
+  assert.equal(await page.getByRole('region', { name: 'Gemini Models', exact: true }).count(), 1)
+  assert.equal(await page.getByRole('region', { name: 'Gemini 4 Argon', exact: true }).count(), 1)
   assert.equal(await page.getByRole('region', { name: 'Claude and GPT models', exact: true }).count(), 1)
+  assert.equal(await page.getByRole('progressbar').count(), 5)
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.usageCalls), '1')
   assert.deepEqual(errors, [])
-  console.log('PASS: provider-defined quota groups, five remaining indicators, narrow layout and immediate visibility updates')
+  console.log('PASS: shared quota groups survive picker changes; remaining indicators and narrow layout verified')
 } finally {
   await browser.close()
 }

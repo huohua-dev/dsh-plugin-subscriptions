@@ -20,7 +20,10 @@ import {
   AnthropicStreamTranslator,
   CLAUDE_CODE_IDENTITY,
   CLAUDE_UNKNOWN_TOOL_OUTCOME,
+  REDACTED_THINKING_TEXT,
+  assembleAnthropicMessages,
   cacheControl,
+  requestBaseDigest,
   markMessageCache,
   reconcileAnthropicToolPairs,
   toAnthropicMessages,
@@ -846,51 +849,34 @@ const SIGNED_THINKING_EVENTS: AnthropicStreamEvent[] = [
   { type: 'message_stop' },
 ]
 
-test('Anthropic translator: signed thinking rides the finish replay envelope', () => {
-  const chunks = drain(new AnthropicStreamTranslator(), SIGNED_THINKING_EVENTS)
+test('signed thinking and redaction replay in place only when their request and text still match', () => {
+  const target = { provider: 'claude', model: 'claude-opus-5', base: requestBaseDigest(toAnthropicSystem()) }
+  const first = message('user', [{ type: 'text', text: 'go' }])
+  const { binding } = assembleAnthropicMessages([first], target)
+  const chunks = drain(new AnthropicStreamTranslator(binding), SIGNED_THINKING_EVENTS)
   const finish = chunks.at(-1)
-  assert.equal(finish?.type, 'finish')
-  if (finish?.type !== 'finish') return
+  assert.ok(finish?.type === 'finish')
   assert.deepEqual(finish.reason, { kind: 'tool-calls' })
-  const replay = finish.replayState as { response: unknown; blocks: Record<string, unknown>[] }
-  assert.deepEqual(replay.response, { kind: 'claude', version: 1 })
-  assert.equal(replay.blocks.length, 2, 'one entry per emitted harness block; redacted thinking has none')
-  const thinking = replay.blocks[0].thinking as { signature: string; digest: string }
-  assert.equal(thinking.signature, 'EqSigPart2', 'signature deltas concatenate')
-  assert.deepEqual(replay.blocks[1], { redactedBefore: ['ENCRYPTED'] }, 'redacted thinking rides with the next block')
-  assert.ok(!chunks.some(chunk => chunk.type === 'block-start' && chunk.blockType !== 'reasoning' && chunk.blockType !== 'tool-call'))
-})
-
-test('toAnthropicMessages replays signed thinking to the same route and model only', () => {
-  const chunks = drain(new AnthropicStreamTranslator(), SIGNED_THINKING_EVENTS)
-  const finish = chunks.at(-1)
-  if (finish?.type !== 'finish') throw new Error('no finish')
+  const replayState = finish.replayState
+  assert.ok(replayState)
   const blocks = chunks.flatMap(chunk => (chunk.type === 'block-end' ? [chunk.block] : []))
+  assert.deepEqual(blocks[1], { type: 'reasoning', text: REDACTED_THINKING_TEXT })
   const history = (model: string, content = blocks) => [
-    message('user', [{ type: 'text', text: 'go' }]),
-    message('assistant', content as ContentBlock[], {
-      kind: 'model', provider: 'claude', model, replayState: finish.replayState,
-    }),
+    first,
+    message('assistant', content, { kind: 'model', provider: 'claude', model, replayState }),
     message('tool', [{ type: 'text', text: 'done' }], { kind: 'tool', callId: ToolCallId('toolu-9') }),
   ]
-  const same = toAnthropicMessages(history('claude-opus-5'), { provider: 'claude', model: 'claude-opus-5' })
+  const same = toAnthropicMessages(history(target.model), target)
   assert.deepEqual(same[1].content, [
     { type: 'thinking', thinking: 'Let me look.', signature: 'EqSigPart2' },
     { type: 'redacted_thinking', data: 'ENCRYPTED' },
     { type: 'tool_use', id: 'toolu-9', name: 'bash', input: {} },
   ])
-
-  const otherModel = toAnthropicMessages(history('claude-sonnet-5'), { provider: 'claude', model: 'claude-opus-5' })
+  const otherModel = toAnthropicMessages(history('claude-sonnet-5'), target)
   assert.deepEqual(otherModel[1].content.map(block => block.type), ['tool_use'], 'a foreign signature is never sent')
-
-  const rewritten = toAnthropicMessages(
-    history('claude-opus-5', [{ type: 'reasoning', text: 'edited' }, blocks[1]]),
-    { provider: 'claude', model: 'claude-opus-5' },
-  )
-  assert.deepEqual(rewritten[1].content.map(block => block.type), ['redacted_thinking', 'tool_use'],
-    'reasoning whose text no longer matches its signature is dropped')
-
-  const noScope = toAnthropicMessages(history('claude-opus-5'))
+  const rewritten = toAnthropicMessages(history(target.model, [{ type: 'reasoning', text: 'edited' }, ...blocks.slice(1)]), target)
+  assert.equal(rewritten[1].content.some(block => block.type === 'thinking'), false, 'edited text is never sent under an old signature')
+  const noScope = toAnthropicMessages(history(target.model))
   assert.deepEqual(noScope[1].content.map(block => block.type), ['tool_use'])
 })
 

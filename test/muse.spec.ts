@@ -153,7 +153,7 @@ test('museUsageFromKey maps the 5-hour and weekly windows with second-based rese
     supported: true,
     plan: 'Muse Code Everyday Usage',
     windows: [
-      { kind: 'session', usedPercent: 12, resetsAt: 1_791_966_644_000 },
+      { kind: 'session', usedPercent: 12, resetsAt: 1_791_966_644_000, durationMs: 5 * 60 * 60_000 },
       { kind: 'weekly', usedPercent: 4, resetsAt: 1_792_368_000_000 },
     ],
   })

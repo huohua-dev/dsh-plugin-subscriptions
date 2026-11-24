@@ -13,7 +13,11 @@ import type { DeviceFlowSpec } from '../src/auth/device-flow.js'
 const DEVICE_CODE_URL = 'https://github.com/login/device/code'
 const TOKEN_URL = 'https://github.com/login/oauth/access_token'
 
-/** A fetch implementation replaying queued responses per URL; records request bodies. */
+/**
+ * A fetch implementation replaying queued responses per URL; records request
+ * bodies. An `Error` entry rejects instead, simulating a transport failure that
+ * arrives without any response.
+ */
 function fakeFetch(script: Record<string, unknown[]>): {
   fetchFn: typeof fetch
   bodies: (url: string) => string[]
@@ -30,6 +34,7 @@ function fakeFetch(script: Record<string, unknown[]>): {
     list.push(typeof init?.body === 'string' ? init.body : '')
     bodies.set(url, list)
     const payload = queue.shift()
+    if (payload instanceof Error) return Promise.reject(payload)
     if (payload instanceof Response) return Promise.resolve(payload)
     return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }))
   }) as typeof fetch
@@ -149,6 +154,22 @@ test('device flow: a second concurrent attempt for one provider is refused', asy
   attempt.cancel()
 })
 
+test('device flow: the in-flight device-code request holds the provider slot', async () => {
+  let respond!: (response: Response) => void
+  const response = new Promise<Response>(resolve => { respond = resolve })
+  let requests = 0
+  const fetchFn: typeof fetch = () => { requests += 1; return response }
+  const manager = new DeviceFlowManager()
+  const pending = manager.start('copilot', spec(fetchFn))
+  assert.equal(manager.isBusy('copilot'), true)
+  await assert.rejects(manager.start('copilot', spec(fetchFn)), /already in progress/)
+  respond(new Response(JSON.stringify(DEVICE_CODE)))
+  const attempt = await pending
+  attempt.cancel()
+  assert.equal(manager.isBusy('copilot'), false)
+  assert.equal(requests, 1)
+})
+
 test('device flow: a malformed device-code response fails the start', async () => {
   const { fetchFn } = fakeFetch({
     [DEVICE_CODE_URL]: [{ device_code: 'dc-1' }],
@@ -156,4 +177,83 @@ test('device flow: a malformed device-code response fails the start', async () =
   const manager = new DeviceFlowManager()
   await assert.rejects(manager.start('copilot', spec(fetchFn)), /missing/)
   assert.equal(manager.isBusy('copilot'), false)
+})
+
+test('device flow: a transport failure before the device code is retried', async () => {
+  const { fetchFn, bodies } = fakeFetch({
+    [DEVICE_CODE_URL]: [new Error('read ECONNRESET'), DEVICE_CODE],
+    [TOKEN_URL]: [{ access_token: 'gh-token' }],
+  })
+  const manager = new DeviceFlowManager()
+  const attempt = await manager.start('copilot', spec(fetchFn))
+
+  // The dropped request is re-sent; the second one mints the code.
+  assert.equal(bodies(DEVICE_CODE_URL).length, 2)
+  assert.equal(attempt.userCode, 'ABCD-1234')
+  assert.equal(await attempt.waitToken(), 'gh-token')
+})
+
+test('device flow: an HTTP error response is not retried', async () => {
+  const { fetchFn, bodies } = fakeFetch({
+    [DEVICE_CODE_URL]: [new Response('nope', { status: 403 }), DEVICE_CODE],
+  })
+  const manager = new DeviceFlowManager()
+
+  await assert.rejects(manager.start('copilot', spec(fetchFn)), /HTTP 403/)
+  // A response, even a failing one, is an answer: retrying would mint an orphan code.
+  assert.equal(bodies(DEVICE_CODE_URL).length, 1)
+})
+
+test('device flow: device-code retries are bounded', async () => {
+  const reset = new Error('read ECONNRESET')
+  const { fetchFn, bodies } = fakeFetch({
+    [DEVICE_CODE_URL]: [reset, new Error('read ECONNRESET'), new Error('read ECONNRESET'), new Error('read ECONNRESET')],
+  })
+  const manager = new DeviceFlowManager()
+
+  await assert.rejects(manager.start('copilot', spec(fetchFn)), /ECONNRESET/)
+  assert.equal(bodies(DEVICE_CODE_URL).length, 3)
+  assert.equal(manager.isBusy('copilot'), false)
+})
+
+test('device flow: a transport failure while polling does not end the login', async () => {
+  const { fetchFn } = fakeFetch({
+    [DEVICE_CODE_URL]: [DEVICE_CODE],
+    [TOKEN_URL]: [new Error('read ECONNRESET'), { error: 'authorization_pending' }, { access_token: 'gh-token' }],
+  })
+  const manager = new DeviceFlowManager()
+  const attempt = await manager.start('copilot', spec(fetchFn))
+
+  // A dropped poll is not an answer from GitHub, so the login keeps polling.
+  assert.equal(await attempt.waitToken(), 'gh-token')
+})
+
+test('device flow: preserves provider headers and omits absent scope when retrying', async () => {
+  const requests: { url: string; init: RequestInit | undefined }[] = []
+  const { fetchFn } = fakeFetch({
+    [DEVICE_CODE_URL]: [new Error('transport dropped'), DEVICE_CODE],
+    [TOKEN_URL]: [new Error('transport dropped'), { access_token: 'test-token' }],
+  })
+  const manager = new DeviceFlowManager()
+  const { scope: _unused, ...noScope } = spec(fetchFn)
+  const attempt = await manager.start('muse', {
+    ...noScope, headers: { 'x-test-client': 'custom-provider' },
+    fetchFn: (input, init) => { requests.push({ url: String(input), init }); return fetchFn(input, init) },
+  })
+  assert.equal(await attempt.waitToken(), 'test-token')
+  assert.equal(requests.length, 4)
+  for (const { url, init } of requests) {
+    assert.equal(new Headers(init?.headers).get('x-test-client'), 'custom-provider')
+    if (url === DEVICE_CODE_URL) assert.equal(new URLSearchParams(String(init?.body)).has('scope'), false)
+  }
+})
+
+test('device flow: reports the status of a non-JSON poll error without retrying', async () => {
+  const { fetchFn, bodies } = fakeFetch({
+    [DEVICE_CODE_URL]: [DEVICE_CODE],
+    [TOKEN_URL]: [new Response('Access denied', { status: 403 })],
+  })
+  const attempt = await new DeviceFlowManager().start('copilot', spec(fetchFn))
+  await assert.rejects(attempt.waitToken(), /HTTP 403/)
+  assert.equal(bodies(TOKEN_URL).length, 1)
 })

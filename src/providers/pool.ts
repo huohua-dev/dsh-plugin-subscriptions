@@ -28,7 +28,7 @@ import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, isUnhintedAntigravityThrottle, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { llmErrorFromFailure, withAbortSignal } from './common.js'
-import { streamAccountWithReplay } from './replay.js'
+import { streamAccountWithReplay, type RequestEndObserver } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
 export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized'
@@ -50,6 +50,10 @@ export interface PoolAdapterOptions {
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
   tiers: Record<string, PoolMemberRef[]>
   onWarn: (message: string) => void
+  /** Excludes opted-out providers, including from explicit tiers and previously prepared calls. */
+  providerEnabled?: (provider: ProviderId) => boolean
+  /** Usage tracking: told about every member attempt that reported usage, failed ones included. */
+  onRequestEnd?: RequestEndObserver
 }
 
 /** Bound on sticky-session memory; oldest entries evict past it. */
@@ -102,7 +106,8 @@ export class PoolAdapter extends LlmAdapter {
   private usable(pools: Map<string, PoolDefinition>): Map<string, PoolDefinition> {
     const result = new Map<string, PoolDefinition>(pools)
     for (const [id, definition] of [...result]) {
-      const kept = definition.members.filter(member => this.options.adapters[member.provider] !== undefined)
+      const kept = definition.members.filter(member => this.options.adapters[member.provider] !== undefined
+        && this.options.providerEnabled?.(member.provider) !== false)
       if (kept.length === 0) result.delete(id)
       else if (kept.length < definition.members.length) result.set(id, { ...definition, members: kept })
     }
@@ -266,11 +271,12 @@ export class PoolAdapter extends LlmAdapter {
     let tried = 0
     for (const member of candidates) {
       options.signal?.throwIfAborted()
+      if (this.options.providerEnabled?.(member.provider) === false) continue
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
       tried += 1
       const iterator = streamAccountWithReplay(
-        adapter, { ...options, provider: member.provider }, member.account, member.model,
+        adapter, { ...options, provider: member.provider }, member.account, member.model, this.options.onRequestEnd,
       )[Symbol.asyncIterator]()
       let first: IteratorResult<StreamChunk>
       const leadingUsage: StreamChunk[] = []
@@ -360,6 +366,7 @@ export class PoolAdapter extends LlmAdapter {
   ): Promise<ConcretePoolMember[]> {
     const usable = members.filter(member =>
       this.options.adapters[member.provider] !== undefined
+      && this.options.providerEnabled?.(member.provider) !== false
       && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
     if (usable.length === 0) return []
     const quotas = new Map<ConcretePoolMember, MemberQuota>(
@@ -383,11 +390,11 @@ export class PoolAdapter extends LlmAdapter {
         : [stickyMember, ...eligible.filter(member => member !== stickyMember)]
     }
     const scored = eligible.filter(member => quotas.get(member)?.available === true)
-    const quotaFull = eligible.filter(member => quotas.get(member)?.available === false)
+    const nearFull = eligible.filter(member => quotas.get(member)?.available === false)
     const byUrgency = (a: ConcretePoolMember, b: ConcretePoolMember): number =>
       (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0)
     scored.sort(byUrgency)
-    quotaFull.sort(byUrgency)
+    nearFull.sort(byUrgency)
     if (stickyMember !== undefined && scored.includes(stickyMember)) {
       const best = scored[0]
       const stickyUrgency = quotas.get(stickyMember)?.urgency ?? 0
@@ -398,7 +405,7 @@ export class PoolAdapter extends LlmAdapter {
         scored.unshift(stickyMember)
       }
     }
-    return [...scored, ...quotaFull]
+    return [...scored, ...nearFull]
   }
 
   /** Pin the serving member to the session (with bounded memory). */

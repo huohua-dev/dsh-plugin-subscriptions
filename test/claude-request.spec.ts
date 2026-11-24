@@ -7,9 +7,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
-import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { Message } from '@deepseek-ai/dsh-llm'
-import { ClaudeAdapter, claudeEffort, claudeThinkingType } from '../src/providers/claude.js'
+import { BlockAssembler, LlmError, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { CLAUDE_API_URL, CLAUDE_THINKING_BINDING_BETA, ClaudeAdapter, claudeEffort, claudeThinkingType } from '../src/providers/claude.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { DiscoveredModel, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession } from '../src/auth/store.js'
@@ -155,4 +155,88 @@ test('an extended-only model keeps a manual budget below its output cap', async 
   assert.equal(body.max_tokens, 64_000)
   assert.ok(thinking.budget_tokens < 64_000)
   assert.deepEqual(body.output_config, { effort: 'high' })
+})
+
+const PREFIX_MODEL = 'claude-opus-5-5'
+const userMessage = (id: string, text: string): Message => ({
+  id: MessageId(id), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' },
+})
+
+function replayFixture() {
+  const requests: { headers: Headers; body: { messages: { content: Record<string, unknown>[] }[]; thinking: unknown; system: { text: string }[] } }[] = []
+  const replies: Response[] = []
+  const adapter = new ClaudeAdapter({
+    models: [],
+    streamIdleTimeoutMs: 5_000,
+    tokens: memoryTokens(SESSION),
+    discovery: true,
+    resolveCliVersion: async () => '2.1.999',
+    fetchFn: async (url, init) => {
+      if (String(url).includes('/v1/models')) {
+        return new Response(JSON.stringify({ data: [{ ...MODELS.data[0], id: PREFIX_MODEL }] }))
+      }
+      assert.equal(String(url), CLAUDE_API_URL)
+      requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) })
+      const reply = replies.shift()
+      assert.ok(reply, 'no unexpected additional request')
+      return reply
+    },
+  })
+  const options = {
+    provider: 'claude', model: PREFIX_MODEL, sessionId: 'fixed-session' as NonNullable<GenerateOptions['sessionId']>,
+    messages: [userMessage('prompt', 'question')],
+  } satisfies GenerateOptions
+  const drain = async (messages: Message[]) => {
+    const assembler = new BlockAssembler()
+    for await (const chunk of adapter.stream({ ...options, messages })) assembler.push(chunk)
+    return assembler
+  }
+  return { options, replies, requests, drain }
+}
+
+test('Claude wire binds signed replay and falls back only for an invalid replay signature', async () => {
+  const { options, replies, requests, drain } = replayFixture()
+  const signed = [
+    { type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: 'first thought', signature: 'sig' } },
+    { type: 'content_block_stop', index: 1 },
+  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + STREAM
+  replies.push(new Response(signed))
+  const first = await drain(options.messages)
+  assert.ok(first.replayState)
+  const history: Message[] = [
+    ...options.messages,
+    {
+      id: MessageId('signed'), role: 'assistant', content: first.blocks(),
+      source: { kind: 'model', provider: options.provider, model: PREFIX_MODEL, replayState: first.replayState },
+    },
+    userMessage('follow-up', 'what next?'),
+  ]
+  const sentSignatures = () => requests.map(request => request.body.messages.flatMap(message => message.content)
+    .filter(block => block.type === 'thinking').map(block => block.signature))
+
+  replies.push(new Response(JSON.stringify({ error: { message: 'prompt is too long' } }), { status: 400 }))
+  await assert.rejects(() => drain(history), (error: unknown) => error instanceof LlmError && error.failure.status === 400)
+  assert.deepEqual(sentSignatures(), [[], ['sig']], 'another HTTP 400 is not retried')
+
+  replies.push(new Response(JSON.stringify({ error: { message: 'messages.1.content.0: Invalid `signature` in `thinking` block' } }), { status: 400 }))
+  replies.push(new Response(STREAM))
+  const fallback = await drain(history)
+  assert.deepEqual(sentSignatures(), [[], ['sig'], ['sig'], []])
+  assert.ok(fallback.replayState, 'successful fallback remembers the reset even without new thinking')
+  replies.push(new Response(STREAM))
+  await drain([...history, {
+    id: MessageId('reset'), role: 'assistant', content: fallback.blocks(),
+    source: { kind: 'model', provider: options.provider, model: PREFIX_MODEL, replayState: fallback.replayState },
+  }, userMessage('final', 'continue')])
+  assert.deepEqual(sentSignatures().at(-1), [])
+
+  for (const { body, headers } of requests) {
+    assert.match(body.system[0].text, /^x-anthropic-billing-header:/)
+    assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'drop_block' } })
+    const betas = headers.get('anthropic-beta')?.split(',') ?? []
+    assert.ok(betas.includes('advanced-tool-use-2025-11-20'))
+    assert.ok(betas.includes(CLAUDE_THINKING_BINDING_BETA))
+    assert.ok(!betas.includes('redact-thinking-2026-02-12'))
+    assert.equal(headers.get('x-claude-code-session-id'), requests[0].headers.get('x-claude-code-session-id'))
+  }
 })

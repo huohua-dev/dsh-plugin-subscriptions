@@ -66,11 +66,16 @@ export interface ProviderPreferences {
   /** Absent follows discovery; an explicit selection hides newly discovered models. */
   visibleModels?: string[]
   contextWindows?: Record<string, number>
+  /** Codex-only provider-wide local context budget and output reservation. */
+  contextWindow?: number
+  defaultMaxTokens?: number
   /** Codex only: per-model defaults for subagents, independent of main-session speed. */
   subagentSpeeds?: Record<string, SubagentSpeedTier>
   tools?: Partial<Record<SubscriptionTool, boolean>>
   /** Claude only: overrides the plugin config's `claudePromptCacheTtl`; absent follows config. */
   promptCacheTtl?: PromptCacheTtlSetting
+  /** Antigravity only: opt-in toggle; absent or false keeps the provider disabled by default. */
+  enabled?: boolean
 }
 interface ToolRevision {
   at: number
@@ -142,8 +147,17 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
     }
     result.visibleModels = [...new Set(raw.visibleModels as string[])]
   }
+  for (const field of ['contextWindow', 'defaultMaxTokens'] as const) {
+    const value = raw[field]
+    if (value === undefined) continue
+    if (provider !== 'codex') throw new Error(`${field} is currently supported only for Codex`)
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${field} must be a positive safe integer`)
+    }
+    result[field] = value
+  }
   if (raw.contextWindows !== undefined) {
-    if (provider !== 'codex') throw new Error('context window overrides are currently supported only for Codex')
+    if (provider !== 'codex' && provider !== 'grok') throw new Error('context window overrides are currently supported only for Codex and Grok')
     if (!raw.contextWindows || typeof raw.contextWindows !== 'object' || Array.isArray(raw.contextWindows)) {
       throw new Error('contextWindows must be a model-to-token map')
     }
@@ -161,6 +175,11 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
       throw new Error(`promptCacheTtl must be one of ${PROMPT_CACHE_TTLS.join(', ')}`)
     }
     result.promptCacheTtl = raw.promptCacheTtl as PromptCacheTtlSetting
+  }
+  if (raw.enabled !== undefined) {
+    if (provider !== 'antigravity') throw new Error('enabled is currently supported only for Antigravity')
+    if (typeof raw.enabled !== 'boolean') throw new Error('enabled must be a boolean')
+    if (raw.enabled) result.enabled = true
   }
   if (raw.subagentSpeeds !== undefined) {
     if (provider !== 'codex') throw new Error('subagent speeds are currently supported only for Codex')
@@ -230,9 +249,14 @@ export class ProviderSettingsStore {
     return names && Object.hasOwn(names, model) ? names[model] : fallback
   }
 
-  contextWindow(model: string): number | undefined {
-    const windows = this.current.providers.codex?.contextWindows
+  contextWindow(provider: ProviderId, model: string): number | undefined {
+    const windows = this.current.providers[provider]?.contextWindows
     return windows && Object.hasOwn(windows, model) ? windows[model] : undefined
+  }
+
+  /** Provider-wide local budget preferences, read without cloning all accounts. */
+  codexDefaultBudget(field: 'contextWindow' | 'defaultMaxTokens'): number | undefined {
+    return this.current.providers.codex?.[field]
   }
 
   /** Read on every request so saved changes apply to the next subagent request. */
@@ -258,6 +282,11 @@ export class ProviderSettingsStore {
     return accounts !== undefined && Object.hasOwn(accounts, account) ? accounts[account].proxy : undefined
   }
 
+  /** Antigravity is opt-in (disabled by default); every other provider stays enabled. */
+  providerEnabled(provider: ProviderId): boolean {
+    return provider !== 'antigravity' || this.current.providers.antigravity?.enabled === true
+  }
+
   /** Creation-time policy survives restarts and never changes an existing session. */
   toolEnabled(provider: ProviderId, tool: SubscriptionTool, createdAt = Date.now()): boolean {
     let enabled = true
@@ -268,24 +297,49 @@ export class ProviderSettingsStore {
     return enabled
   }
 
+  private async persist(next: Document): Promise<void> {
+    await mkdir(dirname(this.path), { recursive: true })
+    const temporary = `${this.path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+    try {
+      await writeFile(temporary, JSON.stringify(next, null, 2), { mode: 0o600 })
+      await rename(temporary, this.path)
+    } finally {
+      await rm(temporary, { force: true })
+    }
+    this.current = next
+  }
+
+  setProviderEnabled(provider: ProviderId, enabled: boolean): Promise<void> {
+    if (provider !== 'antigravity') throw new Error('enabled is currently supported only for Antigravity')
+    if (typeof enabled !== 'boolean') throw new Error('enabled must be a boolean')
+    const run = this.writes.then(async () => {
+      const next = structuredClone(this.current)
+      const current = { ...(next.providers[provider] ?? {}) }
+      if (enabled) current.enabled = true
+      else delete current.enabled
+      next.providers[provider] = current
+      await this.persist(next)
+    })
+    this.writes = run.catch(() => undefined)
+    return run
+  }
+
   set(provider: ProviderId, input: unknown): Promise<void> {
     const preferences = validatePreferences(provider, input)
     const run = this.writes.then(async () => {
       const next = structuredClone(this.current)
       const before = next.providers[provider]?.tools ?? {}
+      // Only the opt-in RPC can toggle Antigravity. A Settings dialog may
+      // submit an older snapshot while an enable/disable write is queued.
+      if (provider === 'antigravity') {
+        if (next.providers.antigravity?.enabled === true) preferences.enabled = true
+        else delete preferences.enabled
+      }
       next.providers[provider] = preferences
       if (PROVIDER_TOOLS[provider].some(tool => (before[tool] !== false) !== (preferences.tools?.[tool] !== false))) {
         next.toolHistory.push({ at: Date.now(), provider, tools: preferences.tools ?? {} })
       }
-      await mkdir(dirname(this.path), { recursive: true })
-      const temporary = `${this.path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
-      try {
-        await writeFile(temporary, JSON.stringify(next, null, 2), { mode: 0o600 })
-        await rename(temporary, this.path)
-      } finally {
-        await rm(temporary, { force: true })
-      }
-      this.current = next
+      await this.persist(next)
     })
     this.writes = run.catch(() => undefined)
     return run

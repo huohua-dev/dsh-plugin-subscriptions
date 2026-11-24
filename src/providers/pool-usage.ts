@@ -313,11 +313,10 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
 /**
  * Whether a window constrains this model: unscoped windows always do; a
  * model-scoped window (Claude's Opus/Sonnet lanes) applies when its scope
- * names the model family. A scope that is an exact model id (Antigravity's
- * per-model quotas) matches that id as a whole — a prefix would let the
- * quota of `gemini-3` claim `gemini-3.1-pro` and `gemini-30-pro` too.
+ * names the model family. An exact Antigravity scope cannot claim a longer
+ * model ID. Used by the router and the usage tracker so both agree.
  */
-function windowApplies(window: UsageWindow, model: string, provider: ProviderId): boolean {
+export function windowApplies(window: Pick<UsageWindow, 'scope' | 'scopeExact'>, model: string, provider: ProviderId): boolean {
   if (window.scope === undefined) return true
   const scope = window.scope.toLowerCase()
   const candidate = model.toLowerCase()

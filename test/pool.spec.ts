@@ -42,6 +42,31 @@ test('prepared pools dispatch only members whose capabilities were resolved', as
   assert.deepEqual(adapter.accounts, ['a2'])
 })
 
+test('disabling a tier member prevents quota refreshes and requests even on a prepared tier', async () => {
+  const codex = new FakeAdapter(() => serveOk('codex'))
+  const antigravity = new FakeAdapter(() => serveOk('antigravity'))
+  let enabled = true
+  const lookups: ProviderId[] = []
+  const pool = new PoolAdapter({
+    adapters: { codex, antigravity }, health: new PoolHealthRegistry(),
+    usage: new PoolUsageTracker(provider => async () => {
+      lookups.push(provider)
+      return { supported: true, windows: [] }
+    }),
+    strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'account',
+    providerEnabled: provider => provider !== 'antigravity' || enabled,
+    families: async () => new Map(), onWarn: () => {},
+    tiers: { m: [{ provider: 'codex', model: 'm' }, { provider: 'antigravity', model: 'backup' }] },
+  })
+  const prepared = await pool.prepareCall('codex', 'm')
+  enabled = false
+  pool.invalidate()
+  await collect(prepared.stream(OPTIONS))
+  assert.deepEqual(lookups, ['codex'])
+  assert.equal(codex.calls, 1)
+  assert.equal(antigravity.calls, 0)
+})
+
 for (const withUsage of [false, true]) test(`pool handles terminal failure before content (usage=${withUsage}) like a thrown failure`, async () => {
   const adapter = new FakeAdapter(async function* (_options, account) {
     if (account === 'a1') {
@@ -574,6 +599,25 @@ for (const strategy of ['priority', 'quota_aware', 'quota_normalized'] as const)
     }) })
     await collect(pool.stream(OPTIONS))
     assert.deepEqual(codex.accounts, ['a2'])
+  })
+
+  test(`${strategy}: a sticky account with credits yields to remaining included quota and never spends credits`, async () => {
+    const funded = { ...windowUsage(100, 60_000), credits: { hasCredits: true, unlimited: false, balance: '12.5' } }
+    const data: Record<string, ProviderUsage> = {
+      'codex/a1': windowUsage(0, 60_000),
+      'codex/a2': windowUsage(96, 60_000),
+    }
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const { pool, usage } = makePool({ codex }, { strategy, usage: usageFetchers(data) })
+    const options = { ...OPTIONS, sessionId: SessionId('sticky-credits-yields') }
+    await collect(pool.stream(options))
+    data['codex/a1'] = funded
+    usage.invalidate('codex', 'a1')
+    await collect(pool.stream(options))
+    data['codex/a2'] = funded
+    usage.invalidate('codex', 'a2')
+    await assert.rejects(collect(pool.stream(options)), (error: unknown) => error instanceof LlmError && error.code === 'QUOTA')
+    assert.deepEqual(codex.accounts, ['a1', 'a2'])
   })
 
   test(`${strategy}: sticky account loses eligibility once exhausted and returns after reset`, async () => {

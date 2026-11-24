@@ -51,14 +51,16 @@ try {
   const report = await page.evaluate(() => window.__report())
   assert.equal(report.id, 'dsh-plugin-subscriptions')
   assert.deepEqual(report.requested.sort(), ['@deepseek-ai/dsh-client-ui-primitives', 'react', 'react-dom', 'react/jsx-runtime'])
-  for (const entry of ['settings.section/subscriptions', 'tool.call.toolview/image_generate', 'tool.call.toolview/video_generate',
+  for (const entry of ['settings.section/subscriptions', 'settings.section.icon/subscriptions', 'sidebar.panellist/subscriptions',
+    'main/subscriptions', 'tool.call.toolview/image_generate', 'tool.call.toolview/video_generate',
     'conversation.input.right/codex-speed', 'conversation.composer.dock/subscription-usage']) {
     assert.ok(report.registered.includes(entry), `registered ${entry}: ${report.registered.join(', ')}`)
   }
   assert.deepEqual(report.commands, ['fast'])
-  // The only host-primitives reads allowed are decorative glyph lookups by name.
-  const reads = report.primitivesReads.filter(key => key !== '__esModule')
-  assert.deepEqual(reads.sort(), ['IconDataOutlineRegular', 'IconSparkleRegular'], 'no behavioural host primitive is read')
+  // Settings' help uses the shipped Tooltip. The badge still reads only glyphs,
+  // not host positioning/dismissal hooks (which can disappear between releases).
+  const reads = report.primitivesReads.filter(key => key !== '__esModule' && key !== 'Tooltip')
+  assert.deepEqual(reads.sort(), ['IconDataOutlineRegular', 'IconSparkleRegular'], 'badge positioning remains local')
 
   // Opening: the dialog hangs above the pill with the 8px gap, inside the 12px viewport margin.
   const geometry = async () => {
@@ -126,6 +128,19 @@ try {
   // The sibling composer entry registered by the same bundle renders too.
   await page.getByRole('button', { name: /Speed/ }).waitFor()
 
+  await page.getByRole('button', { name: 'Subscriptions', exact: true }).click()
+  await page.getByRole('heading', { name: 'Subscription Usage', exact: true }).waitFor()
+  const muse = page.getByRole('button', { name: /^Muse Code/ })
+  await muse.click()
+  await page.waitForFunction(() => window.__report().dashboardCalls.includes('muse'))
+  await page.getByText('muse-fixture', { exact: true }).first().waitFor()
+  const settings = page.getByRole('tab', { name: 'Settings', exact: true })
+  await settings.click()
+  await page.getByRole('tab', { name: 'Google Antigravity' }).click()
+  await page.getByText('Google Antigravity is disabled by default', { exact: true }).waitFor()
+  await page.getByRole('tab', { name: 'Usage', exact: true }).click()
+  assert.equal(await muse.getAttribute('aria-pressed'), 'true', 'the dashboard retains its provider filter')
+
   assert.deepEqual(errors, [])
-  console.log('100%: shipped client bundle works against a host without useAnchoredPosition')
+  console.log('100%: shipped bundle renders the badge and Subscriptions tabs on the host module table')
 } finally { await browser.close() }

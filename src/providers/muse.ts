@@ -303,7 +303,10 @@ function museWindow(kind: UsageWindow['kind'], wire: MuseUsageWindowWire | undef
     // Seconds, but tolerate a millisecond stamp should the wire ever switch.
     ? (wire.resets_at < 1e12 ? wire.resets_at * 1000 : wire.resets_at)
     : undefined
-  return { kind, usedPercent: wire.used_percent, ...resetsAt === undefined ? {} : { resetsAt } }
+  const duration = wire.window_duration_mins
+  const durationMs = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+    ? duration * 60_000 : undefined
+  return { kind, usedPercent: wire.used_percent, ...resetsAt === undefined ? {} : { resetsAt }, ...durationMs === undefined ? {} : { durationMs } }
 }
 
 /**

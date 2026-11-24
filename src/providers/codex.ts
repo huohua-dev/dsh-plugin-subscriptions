@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { CODEX_CONTEXT_WINDOW, CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
 import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -66,19 +67,6 @@ export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
-/** Static fallback in host (combined) units: the GPT-5 family's 272K input + 128K output. */
-const CODEX_CONTEXT_WINDOW = 400_000
-/**
- * Output reservation. Never sent on the wire (the backend takes no output
- * cap); it is the host's per-turn completion reserve, and the amount added to
- * the catalog's input-only windows to express them in combined units.
- */
-const CODEX_DEFAULT_MAX_TOKENS = 128_000
-
-/** The output reservation for one model: a configured cap, else the family's 128K. */
-function codexDefaultMaxTokens(configured: ModelEntry | undefined): number {
-  return configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS
-}
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
@@ -384,10 +372,20 @@ interface CodexUsageWindow {
 /** Seconds of the canonical 5-hour session and 7-day weekly windows. */
 const SESSION_WINDOW_SECONDS = 5 * 60 * 60
 const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+/**
+ * Relative tolerance of a window-length match (±5%, both ends included).
+ * The usage window tracker's 5-hour and weekly classification ranges
+ * use it too, through {@link matchesWindow}.
+ */
+const WINDOW_LENGTH_TOLERANCE = 0.05
 
-/** Whether a reported duration approximately matches the expected window length. */
-function matchesWindow(seconds: number, expected: number): boolean {
-  return seconds >= expected * 0.95 && seconds <= expected * 1.05
+/**
+ * Whether a reported duration approximately matches the expected window
+ * length: within ±5%, both ends included. Unit-free (seconds here, ms in the
+ * usage window tracker, which reuses it for classification).
+ */
+export function matchesWindow(value: number, expected: number): boolean {
+  return value >= expected * (1 - WINDOW_LENGTH_TOLERANCE) && value <= expected * (1 + WINDOW_LENGTH_TOLERANCE)
 }
 
 /**
@@ -687,6 +685,8 @@ export interface CodexAdapterOptions {
    */
   defaultEffortOf?: (model: string) => string | undefined
   contextWindowOf?: (model: string) => number | undefined
+  defaultContextWindow?: () => number | undefined
+  defaultMaxTokens?: () => number | undefined
   /**
    * Per-request speed lookup (the composer Speed toggle's host half). Returns
    * whether this session's current choice sends the model on the fast tier;
@@ -1056,14 +1056,16 @@ export class CodexAdapter extends LlmAdapter {
       discovered?.reasoning ?? { efforts: CODEX_EFFORTS, defaultEffort: CODEX_DEFAULT_EFFORT },
       { extendable: discovered?.reasoning === undefined },
     )
+    const defaultMaxTokens = this.outputReserve(configured)
+    const limits = this.contextLimitsFor(discovered, configured, defaultMaxTokens)
     return {
       provider,
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? CODEX_MODALITIES,
-      context: { contextWindow: await this.contextWindowFor(model, account) },
-      defaultMaxTokens: codexDefaultMaxTokens(configured),
+      context: { contextWindow: Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max) },
+      defaultMaxTokens,
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
@@ -1072,37 +1074,28 @@ export class CodexAdapter extends LlmAdapter {
    * Account-specific context bounds, in the host's combined (request +
    * response) tokens.
    *
-   * The `/models` `context_window` / `max_context_window` fields are INPUT
-   * limits: the GPT-5 family's 272K is its 400K window minus the 128K output
-   * reservation, and the 1M tier advertises 872K. The host reserves
-   * `defaultMaxTokens` out of `contextWindow` before it budgets history, so
-   * passing the raw figure through counted the output twice (a 272K entry left
-   * only 144K of history). The reservation is added back here, so the history
-   * budget equals exactly what the backend accepts as input.
-   *
-   * `standard` is the backend's default tier, `max` the largest window the
-   * account may opt into, and `default` the window used when the user sets no
-   * override: the maximum, because the backend accepts it on every request
-   * (Codex itself only gates it behind a config key). An absent maximum
-   * conservatively keeps the standard window. A configured static
-   * `contextWindow` is already in host units and is used verbatim.
+   * The catalog reports input-only limits. Add exactly the reserve advertised
+   * to DSH, which subtracts it out before budgeting history. An absent catalog
+   * maximum keeps the standard limit; static windows use combined tokens.
+   * `default` is the effective window without a per-model override: the
+   * provider-wide preference, capped at the account maximum, or that maximum.
    */
   async contextLimits(model: string, account?: string): Promise<{ standard: number; default: number; max: number }> {
     const discovered = await this.discovered(model, account)
     const configured = this.options.models.find(entry => entry.id === model)
-    if (discovered?.contextWindow === undefined) {
-      const fallback = configured?.contextWindow ?? CODEX_CONTEXT_WINDOW
-      return { standard: fallback, default: fallback, max: fallback }
-    }
-    const reserve = codexDefaultMaxTokens(configured)
-    const standard = discovered.contextWindow + reserve
-    const max = Math.max(standard, (discovered.maxContextWindow ?? discovered.contextWindow) + reserve)
-    return { standard, default: max, max }
+    return this.contextLimitsFor(discovered, configured, this.outputReserve(configured))
   }
 
-  private async contextWindowFor(model: string, account?: string): Promise<number> {
-    const limits = await this.contextLimits(model, account)
-    return Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max)
+  private outputReserve(configured: ModelEntry | undefined): number {
+    return configured?.maxTokens ?? this.options.defaultMaxTokens?.() ?? CODEX_DEFAULT_MAX_TOKENS
+  }
+
+  private contextLimitsFor(discovered: DiscoveredModel | undefined, configured: ModelEntry | undefined, reserve: number) {
+    const fallback = configured?.contextWindow ?? CODEX_CONTEXT_WINDOW
+    const standard = discovered?.contextWindow === undefined ? fallback : discovered.contextWindow + reserve
+    const max = discovered?.contextWindow === undefined || discovered.maxContextWindow === undefined
+      ? standard : Math.max(standard, discovered.maxContextWindow + reserve)
+    return { standard, default: Math.min(this.options.defaultContextWindow?.() ?? max, max), max }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

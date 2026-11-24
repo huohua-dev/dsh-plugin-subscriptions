@@ -5,7 +5,7 @@
  * ({@link AnthropicStreamTranslator}) so tests need no streams.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, type Hash } from 'node:crypto'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
@@ -22,13 +22,9 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
+import type { ResolvedToolResultBlock, TranslatableBlock, TranslatableMessage } from './resolved.js'
 
-/**
- * The Claude Code identity block. The subscription endpoint rejects requests
- * that do not present as Claude Code, so this block is REQUIRED as the first
- * system entry on every request.
- */
+/** The existing Claude system identity block, before the conversation's instructions. */
 export const CLAUDE_CODE_IDENTITY = 'You are Claude Code, Anthropic\'s official CLI for Claude.'
 
 /** Tags wrapping a mid-conversation system message where it sits in the history. */
@@ -46,10 +42,8 @@ export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 export const CACHE_BLOCK_STRIDE = 15
 
 /**
- * Message breakpoints per request. Anthropic allows four in total: the last
- * `system` block and the last tool hold the tools+system prefix, so the
- * history gets the rest — enough to tolerate a turn appending roughly {@link
- * CACHE_BLOCK_STRIDE} × 2 blocks before a read is lost.
+ * Maximum conversation breakpoints after the system anchor. Anthropic allows
+ * four in total, so a separate tool anchor leaves two for the conversation.
  */
 export const MESSAGE_CACHE_BREAKPOINTS = 3
 
@@ -94,76 +88,324 @@ export interface AnthropicMessage {
   content: Record<string, unknown>[]
 }
 
-/**
- * Tool result text for a `tool_use` the history never answered (an
- * interrupted or compacted turn). Anthropic rejects a call without a result,
- * so one is supplied; the model must not assume the call ran or did not.
- */
+/** Tool result text for a call interrupted before its outcome was recorded. */
 export const CLAUDE_UNKNOWN_TOOL_OUTCOME = 'The tool call has no recorded result. Its outcome is unknown; verify external state before retrying any operation that may have side effects.'
 
-/** Response-level replay marker this translator stamps on every Claude finish. */
-interface ClaudeReplayResponse {
-  kind: 'claude'
-  version: 1
+/**
+ * What a response's thinking is bound to, recorded with the response.
+ *
+ * Anthropic binds each returned `thinking` / `redacted_thinking` block to its
+ * prefix (the top-level `system`, the set of `tools`, and everything before
+ * the block in `messages`, thinking blocks and cache markers aside) and to the
+ * thinking block that preceded it. A block sent back after its prefix changed
+ * fails the server's check: it is silently dropped or the request is rejected
+ * (HTTP 400), depending on the account. Recording the binding lets a later
+ * request tell, before sending, which blocks are still valid. See
+ * https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#prefix-check
+ */
+export interface ThinkingBinding {
+  /** {@link prefixDigest} of the request the response was produced for. */
+  prefix: string
+  /** {@link replayDigest} of the last thinking block that request sent; null when it sent none. */
+  prev: string | null
+  /**
+   * Set on the response to a request sent after the API refused replayed
+   * thinking: no thinking from before that response is sent again.
+   */
+  reset?: true
 }
 
 /**
- * Per-block replay metadata, aligned with the emitted harness blocks.
- * `thinking` carries the signature Anthropic issued for a reasoning block
- * plus a digest of its text, so a history rewrite that shifted blocks cannot
- * pin a signature to the wrong reasoning. `redactedBefore` carries
- * `redacted_thinking` payloads that preceded the block on the wire (they have
- * no harness block of their own).
+ * Response-level part of the replay envelope this translator emits. The tag
+ * keeps a history entry written by another adapter (or another envelope
+ * shape) from being read as Anthropic thinking metadata, and a response
+ * recorded without its binding is never replayed.
  */
-export interface ClaudeBlockReplay {
-  thinking?: { signature: string; digest: string }
-  redactedBefore?: string[]
+export interface AnthropicReplayResponse extends Partial<ThinkingBinding> {
+  kind: 'anthropic'
+  version: 2
+  /** {@link responseContentDigest} of the response's own non-thinking content, as streamed. */
+  content?: string
 }
 
-/** Which historical assistant messages may replay their thinking: same route, same model. */
-export interface ClaudeReplayScope {
-  provider: string
-  model: string
-}
+/**
+ * Per-block replay metadata, aligned with the emitted blocks: a `thinking`
+ * block keeps its signature, a `redacted_thinking` block keeps its opaque
+ * payload, and every other block needs nothing.
+ */
+export type AnthropicBlockReplay =
+  | Record<string, never>
+  | { signature: string; thinkingDigest?: string }
+  | { redactedData: string }
 
-/** Short digest binding a thinking signature to the reasoning text it signed. */
+/** Harness text standing in for a `redacted_thinking` block, which carries no readable reasoning. */
+export const REDACTED_THINKING_TEXT = '[Reasoning redacted]'
+
+/** Locally check that a history rewrite did not edit the text under a signature. */
 function thinkingDigest(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 16)
+  return createHash('sha256').update(text, 'utf16le').digest('base64url').slice(0, 22)
 }
 
-/** Block types Anthropic refuses `cache_control` on. */
+/** A short, stable identity for one thinking block's signature or redacted payload. */
+export function replayDigest(opaque: string): string {
+  return createHash('sha256').update(opaque, 'utf8').digest('base64url').slice(0, 22)
+}
+
+/** JSON with object keys sorted, so equal content always hashes equally. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort()
+      .filter(key => record[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** A wire block as the prefix check sees it: cache markers are not part of the prefix. */
+function prefixView(block: Record<string, unknown>): Record<string, unknown> {
+  if (!('cache_control' in block)) return block
+  const { cache_control: _marker, ...rest } = block
+  return rest
+}
+
+/** Whether a wire block is a thinking block, which Anthropic does not accept a `cache_control` on. */
 function isThinkingBlock(block: Record<string, unknown>): boolean {
   return block.type === 'thinking' || block.type === 'redacted_thinking'
 }
 
 /**
- * Replay entries for one assistant message, or none when it was produced by
- * another route/model (signatures only verify on the model that issued them)
- * or carries no Claude envelope.
+ * Digest of the request-level part of every thinking block's prefix: the
+ * `system` blocks, and the `tools` compared as a set (their order does not
+ * matter to the check), without cache markers.
+ * @param system - the request's `system` blocks.
+ * @param tools - the request's `tools`, when it sends any.
+ * @returns the digest each message-level prefix digest starts from.
  */
-function claudeReplayBlocks(message: TranslatableMessage, scope: ClaudeReplayScope | undefined): readonly ClaudeBlockReplay[] {
-  if (scope === undefined || message.role !== 'assistant') return []
-  const source = message.source as { kind?: string; provider?: string; model?: string; replayState?: unknown } | undefined
-  if (source?.kind !== 'model' || source.provider !== scope.provider || source.model !== scope.model) return []
-  const envelope = source.replayState
-  if (typeof envelope !== 'object' || envelope === null) return []
-  const { response, blocks } = envelope as { response?: unknown; blocks?: unknown }
-  const marker = response as Partial<ClaudeReplayResponse> | null | undefined
-  if (marker?.kind !== 'claude' || marker.version !== 1 || !Array.isArray(blocks)) return []
-  return blocks.map((raw): ClaudeBlockReplay => {
-    if (typeof raw !== 'object' || raw === null) return {}
-    const entry = raw as Record<string, unknown>
-    const thinking = entry.thinking as Record<string, unknown> | undefined
-    const redacted = Array.isArray(entry.redactedBefore)
-      ? entry.redactedBefore.filter((data): data is string => typeof data === 'string' && data.length > 0)
-      : []
-    return {
-      ...typeof thinking?.signature === 'string' && thinking.signature.length > 0 && typeof thinking.digest === 'string'
-        ? { thinking: { signature: thinking.signature, digest: thinking.digest } }
-        : {},
-      ...redacted.length > 0 ? { redactedBefore: redacted } : {},
+export function requestBaseDigest(
+  system: readonly Record<string, unknown>[],
+  tools: readonly Record<string, unknown>[] = [],
+): string {
+  const set = tools.map(tool => canonicalJson(prefixView(tool))).sort()
+  return createHash('sha256')
+    .update(canonicalJson(system.map(prefixView)))
+    .update(`\u0000${set.join('\u0000')}`)
+    .digest('base64url')
+}
+
+/** A running prefix digest: the request base, then each non-thinking block with its role. */
+function prefixHash(base: string): Hash {
+  return createHash('sha256').update(base)
+}
+
+function hashBlock(hash: Hash, role: string, block: Record<string, unknown>): void {
+  hash.update(`\u0001${role}\u0000${canonicalJson(prefixView(block))}`)
+}
+
+function prefixDigest(hash: Hash): string {
+  return hash.copy().digest('base64url').slice(0, 32)
+}
+
+/**
+ * The wire block an assistant message's non-reasoning block is sent as;
+ * undefined for blocks the Messages API does not accept there.
+ * @param toolId - the id a tool call is sent with: {@link anthropicToolIds}
+ * in a request, the stored id where the response-content digest is taken.
+ */
+function assistantWireBlock(
+  block: TranslatableBlock | ContentBlock,
+  toolId: (id: string) => string,
+): Record<string, unknown> | undefined {
+  switch (block.type) {
+    case 'text':
+      return { type: 'text', text: block.text }
+    case 'tool-call':
+      return { type: 'tool_use', id: toolId(String(block.id)), name: block.name, input: parseToolInput(block.arguments) }
+    case 'image':
+      return 'dataBase64' in block
+        ? { type: 'image', source: { type: 'base64', media_type: block.mediaType, data: block.dataBase64 } }
+        : undefined
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Digest of one assistant response's non-thinking content in wire form. A
+ * thinking block that follows text or a tool call of its own response is bound
+ * to that content too, so replay also requires the stored response to be
+ * unchanged.
+ */
+export function responseContentDigest(blocks: readonly (TranslatableBlock | ContentBlock)[]): string {
+  const hash = createHash('sha256')
+  for (const block of blocks) {
+    // Stored ids: the digest is recorded while streaming, before any request maps them.
+    const wire = assistantWireBlock(block, id => id)
+    if (wire !== undefined) hash.update(`${canonicalJson(wire)}\u0000`)
+  }
+  return hash.digest('base64url').slice(0, 22)
+}
+
+/**
+ * How one request replays thinking: the route and concrete model it targets
+ * and the {@link requestBaseDigest} of its own `system` and `tools`.
+ *
+ * This plugin conservatively replays thinking only to the same concrete
+ * provider, account and model that produced it (the account through
+ * {@link streamAccountWithReplay}). Some models support cross-model thinking
+ * replay; this plugin does not enable it.
+ */
+export interface ThinkingReplayContext {
+  provider: string
+  model: string
+  base: string
+  /** Send no thinking at all: the one-time fallback after the API refused replayed thinking. */
+  disabled?: boolean
+}
+
+/** One stored reasoning block that could be replayed. */
+interface ThinkingCandidate {
+  /** The wire block to send. */
+  block: Record<string, unknown>
+  digest: string
+  /** The thinking block it followed when produced; null for none. */
+  predecessor: string | null
+  /** Index into {@link ReplayHistory.responses}. */
+  response: number
+}
+
+/** One stored response of this route and model with a readable envelope. */
+interface StoredResponse {
+  binding: Partial<ThinkingBinding>
+  /** The response's own content is what it was when its thinking was produced. */
+  contentIntact: boolean
+  /** Running prefix digest where the response starts in this request (set while assembling). */
+  prefixHere?: string
+}
+
+/** The replay metadata of one history, for one request. */
+interface ReplayHistory {
+  responses: StoredResponse[]
+  candidates: ThinkingCandidate[]
+  /** Response index of each assistant message (by message index) that has an envelope. */
+  responseOf: Map<number, number>
+  /** Candidate index of each replayable reasoning block, by message index then content position. */
+  slots: Map<number, Map<number, number>>
+}
+
+/** Read the stored replay metadata of a history: responses of the request's own route and model only. */
+function replayHistory(messages: readonly TranslatableMessage[], replay: ThinkingReplayContext | undefined): ReplayHistory {
+  const history: ReplayHistory = { responses: [], candidates: [], responseOf: new Map(), slots: new Map() }
+  if (replay === undefined) return history
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.role !== 'assistant') continue
+    const source = message.source
+    if (source?.kind !== 'model' || source.provider !== replay.provider || source.model !== replay.model) continue
+    const state = source.replayState
+    if (state === null || typeof state !== 'object') continue
+    const envelope = state as { response?: unknown; blocks?: unknown }
+    const response = envelope.response as Partial<AnthropicReplayResponse> | null | undefined
+    if (response === null || typeof response !== 'object' || response.kind !== 'anthropic' || response.version !== 2) continue
+    const entries = envelope.blocks
+    if (!Array.isArray(entries) || entries.length !== message.content.length) continue
+    const binding: Partial<ThinkingBinding> = {
+      ...typeof response.prefix === 'string' ? { prefix: response.prefix } : {},
+      ...response.prev === null || typeof response.prev === 'string' ? { prev: response.prev } : {},
+      ...response.reset === true ? { reset: true as const } : {},
     }
-  })
+    const index = history.responses.push({
+      binding,
+      contentIntact: typeof response.content === 'string' && response.content === responseContentDigest(message.content),
+    }) - 1
+    history.responseOf.set(messageIndex, index)
+    // The first thinking block followed whatever the request sent last; each
+    // later one follows the previous thinking block of the same response.
+    let predecessor: string | null | undefined = binding.prev
+    const slots = new Map<number, number>()
+    for (const [position, block] of message.content.entries()) {
+      if (block.type !== 'reasoning') continue
+      const entry = entries[position] as Record<string, unknown> | null | undefined
+      let wire: Record<string, unknown> | undefined
+      let digest: string | undefined
+      if (entry !== null && typeof entry === 'object' && typeof entry.redactedData === 'string' && entry.redactedData.length > 0) {
+        wire = { type: 'redacted_thinking', data: entry.redactedData }
+        digest = replayDigest(entry.redactedData)
+      } else if (entry !== null && typeof entry === 'object' && typeof entry.signature === 'string' && entry.signature.length > 0
+        // Older v2 envelopes did not include the local per-block digest.
+        && (entry.thinkingDigest === undefined || entry.thinkingDigest === thinkingDigest(block.text))) {
+        // The text goes back exactly as it was received, with its signature.
+        wire = { type: 'thinking', thinking: block.text, signature: entry.signature }
+        digest = replayDigest(entry.signature)
+      }
+      if (wire !== undefined && digest !== undefined && predecessor !== undefined) {
+        slots.set(position, history.candidates.push({ block: wire, digest, predecessor, response: index }) - 1)
+      }
+      // An unsigned block breaks the chain: nothing after it in this response can be placed.
+      predecessor = digest
+    }
+    if (slots.size > 0) history.slots.set(messageIndex, slots)
+  }
+  return history
+}
+
+/**
+ * Pick the thinking blocks to send.
+ *
+ * The API accepts a replayed block only when its prefix is what it was when the
+ * block was produced, and when the thinking block sent right before it is the
+ * one it followed. The blocks kept must be an unbroken run of the original
+ * sequence: the oldest or the newest may be left out, a middle one may not,
+ * and one left out must stay out, because later blocks were produced without
+ * it. So the run starts at the newest block whose prefix still matches and
+ * follows each block's recorded predecessor backwards, stopping at the first
+ * block that is missing, changed, or older than a refusal.
+ * @returns the candidate indexes to send.
+ */
+function selectThinking(history: ReplayHistory, replay: ThinkingReplayContext | undefined): Set<number> {
+  const chosen = new Set<number>()
+  if (replay === undefined || replay.disabled === true) return chosen
+  let barrier = -1
+  for (const [index, response] of history.responses.entries()) if (response.binding.reset === true) barrier = index
+  const usable = (index: number): boolean => {
+    const candidate = history.candidates[index]
+    const response = history.responses[candidate.response]
+    return candidate.response >= barrier && response.contentIntact
+      && response.binding.prefix !== undefined && response.binding.prefix === response.prefixHere
+  }
+  let at = -1
+  for (let index = history.candidates.length - 1; index >= 0; index--) if (usable(index)) { at = index; break }
+  while (at >= 0) {
+    chosen.add(at)
+    const predecessor = history.candidates[at].predecessor
+    if (predecessor === null) break
+    let previous = -1
+    for (let earlier = at - 1; earlier >= 0; earlier--) {
+      if (history.candidates[earlier].digest === predecessor) { previous = earlier; break }
+    }
+    at = previous !== -1 && usable(previous) ? previous : -1
+  }
+  return chosen
+}
+
+/**
+ * Whether an HTTP failure is the API refusing a replayed thinking block:
+ * ``messages.N.content.M: Invalid `signature` in `thinking` block`` (a
+ * signature it cannot verify, or one bound to a different prefix) or an
+ * invalid `redacted_thinking` payload. Resending the same body fails the same
+ * way; dropping the replayed thinking does not.
+ */
+export function isRefusedThinkingError(error: LlmError): boolean {
+  return error.failure.status === 400
+    && /Invalid `(?:signature|data)` in `(?:redacted_)?thinking` block/.test(error.message)
+}
+
+/** The messages to send, plus the binding the response to them must record. */
+export interface AnthropicMessagesAssembly {
+  messages: AnthropicMessage[]
+  binding: ThinkingBinding
+  /** How many thinking / redacted_thinking blocks are replayed. */
+  replayedThinking: number
 }
 
 /** Preserve native image blocks, retaining the existing text-only wire shape. */
@@ -193,6 +435,89 @@ function parseToolInput(raw: string): Record<string, unknown> {
     // The model produced malformed JSON; an empty object keeps the request valid.
     return {}
   }
+}
+
+/**
+ * The ids the Messages API accepts in `tool_use.id` and
+ * `tool_result.tool_use_id`. Any other id is refused with HTTP 400:
+ * ``messages.N.content.M.tool_use.id: String should match pattern '^[a-zA-Z0-9_-]+$'``.
+ */
+const ANTHROPIC_TOOL_ID = /^[a-zA-Z0-9_-]+$/
+
+/** Longest id {@link generatedToolId} builds; Anthropic's own ids are shorter. */
+const GENERATED_TOOL_ID_MAX_LENGTH = 64
+
+/** Base64url digest characters closing a generated id (96 bits). */
+const GENERATED_TOOL_ID_DIGEST = 16
+
+/** The call id a tool-role message answers: its own correlation field, else the call its source names. */
+function toolMessageCallId(message: TranslatableMessage): string | undefined {
+  const id = message.toolCallId ?? message.tool_call_id
+    ?? (message.source?.kind === 'tool' ? message.source.callId : undefined)
+  return id === undefined ? undefined : String(id)
+}
+
+/**
+ * The accepted id sent for a refused one: the original with every run of
+ * refused characters replaced by `_`, cut short, then a digest of the whole
+ * original. It stays readable next to the history, uses only accepted
+ * characters (base64url included), and depends on nothing but the original
+ * and the attempt. Requests already sent depend on this exact form: a change
+ * rewrites the cached prefix and drops recorded thinking of switched sessions.
+ * @param id - the stored id, which the API refuses.
+ * @param attempt - 0, or how many candidates were already taken in this request.
+ */
+function generatedToolId(id: string, attempt: number): string {
+  const digest = createHash('sha256')
+    .update(attempt === 0 ? id : `${attempt}\u0000${id}`, id.isWellFormed() ? 'utf8' : 'utf16le')
+    .digest('base64url')
+  const stem = id.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, GENERATED_TOOL_ID_MAX_LENGTH - GENERATED_TOOL_ID_DIGEST - 1)
+  return `${stem}_${digest.slice(0, GENERATED_TOOL_ID_DIGEST)}`
+}
+
+/**
+ * The wire id of every tool call and tool result in one request.
+ *
+ * A session can switch providers, so its history can hold calls another
+ * route produced, with ids the Messages API refuses: the OpenAI Codex route
+ * records `call_…|fc_…`. Such ids are rewritten here, in the request only;
+ * the stored history keeps its own.
+ *
+ * - An accepted id is sent verbatim, so a request whose ids are all accepted
+ *   is byte-identical to one built without this step.
+ * - A refused id becomes {@link generatedToolId}. Its first candidate depends
+ *   only on the original, so every request of a session sends the same id and
+ *   the cached prefix and the thinking prefix check keep matching. Only a later
+ *   call already holding that exact candidate (a 96-bit digest match) moves
+ *   it: one cache miss, never a refused request.
+ * - No two ids share a wire id: every accepted id is reserved first, and a
+ *   generated id already taken is derived again. A call and the results that
+ *   answer it carry the same stored id, so they stay paired whichever history
+ *   format names the call.
+ * @param messages - the request's messages.
+ * @returns the wire id of a stored tool-call id.
+ */
+function anthropicToolIds(messages: readonly TranslatableMessage[]): (id: string) => string {
+  const stored = new Set<string>()
+  for (const message of messages) {
+    const answered = message.role === 'tool' ? toolMessageCallId(message) : undefined
+    if (answered !== undefined) stored.add(answered)
+    for (const block of message.content) {
+      if (block.type === 'tool-call') stored.add(String(block.id))
+      else if (block.type === 'tool-result') stored.add(String(block.toolCallId))
+    }
+  }
+  const taken = new Set([...stored].filter(id => ANTHROPIC_TOOL_ID.test(id)))
+  const generated = new Map<string, string>()
+  for (const id of stored) {
+    if (ANTHROPIC_TOOL_ID.test(id)) continue
+    let attempt = 0
+    let wire = generatedToolId(id, attempt)
+    while (taken.has(wire)) wire = generatedToolId(id, ++attempt)
+    taken.add(wire)
+    generated.set(id, wire)
+  }
+  return id => generated.get(id) ?? id
 }
 
 /**
@@ -236,41 +561,6 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
 }
 
 /**
- * Reserve every already-valid ID before allocating replacements. A hash alone
- * can collide with a legal historical ID (or another hash); the request-local
- * registry disambiguates both, while a shared map keeps calls/results paired.
- * Sorting makes allocation independent of message/result order. Durable history
- * and native Claude IDs are never changed.
- */
-function anthropicToolIds(messages: readonly TranslatableMessage[]): Map<string, string> {
-  const ids = new Set<string>()
-  for (const message of messages) {
-    if (message.role === 'tool') {
-      const id = message.toolCallId ?? message.tool_call_id
-        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
-      if (id !== undefined) ids.add(String(id))
-    }
-    for (const block of message.content) {
-      if (block.type === 'tool-call') ids.add(String(block.id))
-      if (block.type === 'tool-result') ids.add(String(block.toolCallId))
-    }
-  }
-  const mapped = new Map<string, string>()
-  const reserved = new Set([...ids].filter(id => /^[a-zA-Z0-9_-]+$/.test(id)))
-  for (const id of reserved) mapped.set(id, id)
-  for (const id of [...ids].filter(id => !reserved.has(id)).sort()) {
-    // UTF-16 keeps even distinct lone-surrogate JS strings distinct pre-hash.
-    const base = `tool_${createHash('sha256').update(id, 'utf16le').digest('hex').slice(0, 48)}`
-    let candidate = base
-    let suffix = 0
-    while (reserved.has(candidate)) candidate = `${base}_${++suffix}`
-    reserved.add(candidate)
-    mapped.set(id, candidate)
-  }
-  return mapped
-}
-
-/**
  * Convert harness messages into Anthropic messages. Consecutive same-role
  * messages merge into one message with multiple content blocks; tool results
  * arrive as user messages with `tool_result` blocks, which a merged user
@@ -278,22 +568,37 @@ function anthropicToolIds(messages: readonly TranslatableMessage[]): Map<string,
  * messages before the conversation starts are handled by
  * {@link toAnthropicSystem} and skipped here, while a later one rides in
  * place as a user-role `<system-reminder>` block.
- * Reasoning replays as a signed `thinking` block only when `replay` names the
- * route and model that produced it and this translator's replay metadata
- * still matches the text; otherwise it is dropped (an unsigned or foreign
- * thinking block is rejected). Whitespace-only text blocks are dropped, as
- * Anthropic rejects them; tool pairing is repaired by request assembly
- * ({@link reconcileAnthropicToolPairs}). Images must arrive pre-resolved
- * ({@link TranslatableMessage}); an unresolved ImageBlock is skipped because
- * its bytes are unreachable here.
+ * Images must arrive pre-resolved ({@link TranslatableMessage}); an
+ * unresolved ImageBlock is skipped because its bytes are unreachable here.
+ *
+ * Reasoning blocks are replayed as signed `thinking` / `redacted_thinking`
+ * blocks, in their original position, only for responses of the request's
+ * own route and model whose binding still holds ({@link selectThinking}):
+ * the prefix each was produced after is computed here from the request being
+ * built, so a changed system prompt, tool set or earlier message drops the
+ * thinking that depended on it while the rest of the history is sent as before.
+ *
+ * Tool-call ids the Messages API refuses, such as the OpenAI Codex route's
+ * `call_…|fc_…`, go out in an accepted form that is the same on every request
+ * ({@link anthropicToolIds}); accepted ids and the stored history are unchanged.
  * @param messages - ordered conversation messages with resolved images.
- * @param replay - the target route/model whose own thinking may be replayed.
- * @returns Anthropic messages in conversation order.
+ * @param replay - the request's route, model and request-level prefix;
+ * omitted, no reasoning is replayed.
+ * @param repairRequest - apply Claude's request-only history repairs before hashing.
+ * @returns the messages and the binding the response to them must record.
  */
-export function toAnthropicMessages(messages: readonly TranslatableMessage[], replay?: ClaudeReplayScope): AnthropicMessage[] {
+export function assembleAnthropicMessages(
+  messages: readonly TranslatableMessage[],
+  replay?: ThinkingReplayContext,
+  repairRequest = false,
+): AnthropicMessagesAssembly {
+  const history = replayHistory(messages, replay)
+  const toolId = anthropicToolIds(messages)
   const out: AnthropicMessage[] = []
+  /** Placeholder object of each candidate, so the final position is known before choosing. */
+  const placeholders = new Map<Record<string, unknown>, number>()
+  const responseStarts = new Map<Record<string, unknown>, number>()
   const start = conversationStart(messages)
-  const toolIds = anthropicToolIds(messages)
   for (const [index, message] of messages.entries()) {
     // A leading system message is an opening instruction; toAnthropicSystem
     // owns those. A later one rides here so the cached prefix ahead of it
@@ -302,12 +607,11 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
     const role = message.role === 'assistant' ? 'assistant' : 'user'
     const blocks: Record<string, unknown>[] = []
     if (message.role === 'tool') {
-      const id = message.toolCallId ?? message.tool_call_id
-        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      const id = toolMessageCallId(message)
       if (id === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
       blocks.push({
         type: 'tool_result',
-        tool_use_id: toolIds.get(String(id))!,
+        tool_use_id: toolId(id),
         content: toolResultContent({ type: 'tool-result', toolCallId: ToolCallId(id), content: message.content }),
         ...message.isError === true ? { is_error: true } : {},
       })
@@ -316,15 +620,18 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
       else out.push({ role: 'user', content: blocks })
       continue
     }
-    const metadata = claudeReplayBlocks(message, replay)
-    // Entries are aligned with the stored blocks; a rewritten message whose
-    // block count moved can no longer be trusted to pair them.
-    const aligned = metadata.length === message.content.length ? metadata : []
+    const slots = history.slots.get(index)
     for (const [position, block] of message.content.entries()) {
-      for (const data of aligned[position]?.redactedBefore ?? []) {
-        blocks.push({ type: 'redacted_thinking', data })
-      }
       switch (block.type) {
+        case 'reasoning': {
+          const candidate = slots?.get(position)
+          if (candidate !== undefined) {
+            const placeholder: Record<string, unknown> = { type: 'thinking' }
+            placeholders.set(placeholder, candidate)
+            blocks.push(placeholder)
+          }
+          break
+        }
         case 'text':
           // Anthropic rejects text blocks without non-whitespace text.
           if (block.text.trim().length === 0) break
@@ -343,18 +650,13 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
           // died holding, which no result will ever answer — so it rides as
           // descriptive text instead of a call the API would reject.
           blocks.push(role === 'assistant'
-            ? {
-                type: 'tool_use',
-                id: toolIds.get(String(block.id))!,
-                name: block.name,
-                input: parseToolInput(block.arguments),
-              }
+            ? assistantWireBlock(block, toolId) as Record<string, unknown>
             : { type: 'text', text: `[tool call ${block.name}: ${block.arguments}]` })
           break
         case 'tool-result':
           blocks.push({
             type: 'tool_result',
-            tool_use_id: toolIds.get(String(block.toolCallId))!,
+            tool_use_id: toolId(String(block.toolCallId)),
             content: toolResultContent(block),
             ...block.isError === true ? { is_error: true } : {},
           })
@@ -369,29 +671,92 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], re
           // An unresolved ImageBlock carries only an attachment reference; the
           // adapter resolves images before translation, so this is skipped.
           break
-        case 'reasoning': {
-          const signed = aligned[position]?.thinking
-          if (role === 'assistant' && signed !== undefined && signed.digest === thinkingDigest(block.text)) {
-            blocks.push({ type: 'thinking', thinking: block.text, signature: signed.signature })
-          }
-          // Unsigned reasoning (another provider's, or a rewritten one) cannot
-          // be verified by Anthropic and is not replayed.
-          break
-        }
         default:
-          // unknown blocks.
+          // Unknown blocks carry nothing the Messages API accepts.
           break
       }
     }
     if (blocks.length === 0) continue
+    const response = history.responseOf.get(index)
+    if (response !== undefined) responseStarts.set(blocks[0]!, response)
     const last = out[out.length - 1]
-    if (last !== undefined && last.role === role) last.content.push(...blocks)
+    if (last?.role === role) last.content.push(...blocks)
     else out.push({ role, content: blocks })
   }
-  for (const message of out) {
-    if (message.role === 'user') leadWithToolResults(message)
+  // Hash the projected request, not the raw history. If a thinking-only
+  // message disappears, rebuild from the unedited projection: merging roles
+  // can change which tool results pair, or whether a trailing turn is needed.
+  const dropped = new Set<Record<string, unknown>>()
+  let working: AnthropicMessage[]
+  let chosen: Set<number>
+  let hash: Hash
+  for (;;) {
+    const merged: AnthropicMessage[] = []
+    for (const message of out) {
+      const content = message.content.filter(block => !dropped.has(block))
+      if (content.length === 0) continue
+      const last = merged[merged.length - 1]
+      if (last?.role === message.role) last.content.push(...content)
+      else merged.push({ role: message.role, content })
+    }
+    for (const message of merged) if (message.role === 'user') leadWithToolResults(message)
+    working = repairRequest ? reconcileAnthropicToolPairs(merged) : merged
+    if (repairRequest && working[working.length - 1]?.role === 'assistant'
+      && messages[messages.length - 1]?.role !== 'assistant') {
+      working.push({ role: 'user', content: [{ type: 'text', text: TRAILING_USER_PLACEHOLDER }] })
+    }
+
+    hash = prefixHash(replay?.base ?? '')
+    for (const response of history.responses) delete response.prefixHere
+    for (const message of working) {
+      // A response merged into the middle of an existing turn has no valid
+      // response boundary at which to replay its thinking.
+      const response = responseStarts.get(message.content[0]!)
+      if (response !== undefined) history.responses[response]!.prefixHere = prefixDigest(hash)
+      hash.update(`\u0002${message.role}`)
+      for (const block of message.content) if (!placeholders.has(block)) hashBlock(hash, message.role, block)
+    }
+    chosen = selectThinking(history, replay)
+    const before = dropped.size
+    for (const message of working) {
+      if (message.content.every(block => placeholders.has(block) && !chosen.has(placeholders.get(block)!))) {
+        for (const block of message.content) dropped.add(block)
+      }
+    }
+    if (dropped.size === before) break
   }
-  return out
+  let prev: string | null = null
+  let replayed = 0
+  const finalMessages: AnthropicMessage[] = working.map(message => ({
+    role: message.role,
+    content: message.content.flatMap(block => {
+      const candidate = placeholders.get(block)
+      if (candidate === undefined) return [block]
+      if (!chosen.has(candidate)) return []
+      replayed += 1
+      prev = history.candidates[candidate]!.digest
+      return [history.candidates[candidate]!.block]
+    }),
+  }))
+  return {
+    messages: finalMessages,
+    binding: {
+      prefix: prefixDigest(hash),
+      prev: replay?.disabled === true ? null : prev,
+      ...replay?.disabled === true ? { reset: true as const } : {},
+    },
+    replayedThinking: replayed,
+  }
+}
+
+/**
+ * Convert harness messages into Anthropic messages ({@link assembleAnthropicMessages}).
+ * @param messages - ordered conversation messages with resolved images.
+ * @param replay - the request's route, model and request-level prefix; omitted, no reasoning is replayed.
+ * @returns Anthropic messages in conversation order.
+ */
+export function toAnthropicMessages(messages: readonly TranslatableMessage[], replay?: ThinkingReplayContext): AnthropicMessage[] {
+  return assembleAnthropicMessages(messages, replay).messages
 }
 
 /** Plain text of a `tool_result`'s content, for riding an orphan result as text. */
@@ -478,6 +843,10 @@ function unknownToolOutcome(id: string): Record<string, unknown> {
  * byte-identical in the next — that entry is what the next request reads.
  * Marks are counted across the flattened block sequence, not per message,
  * because the lookback window Anthropic walks counts blocks the same way.
+ *
+ * Anthropic rejects a `cache_control` on a `thinking` or `redacted_thinking`
+ * block (HTTP 400), so a mark that would land on one moves to the nearest
+ * earlier block that can carry it, without counting the same marker twice.
  * @param messages - assembled Anthropic messages, marked in place.
  * @param ttl - cache lifetime for every mark; defaults to five minutes. The
  * tools+system anchor is always 1h, so a 5m or 1h mark here never follows a
@@ -491,12 +860,14 @@ export function markMessageCache(
   ttl?: PromptCacheTtl,
   marks = MESSAGE_CACHE_BREAKPOINTS,
 ): void {
-  // Replayed thinking blocks refuse cache_control; the marks skip over them.
-  const blocks = messages.flatMap(message => message.content).filter(block => !isThinkingBlock(block))
+  const blocks = messages.flatMap(message => message.content)
+  let floor = blocks.length
   for (let mark = 0; mark < marks; mark++) {
-    const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
+    let at = Math.min(blocks.length - 1 - mark * CACHE_BLOCK_STRIDE, floor - 1)
+    while (at >= 0 && isThinkingBlock(blocks[at])) at -= 1
     if (at < 0) return
     blocks[at].cache_control = cacheControl(ttl)
+    floor = at
   }
 }
 
@@ -554,6 +925,68 @@ export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, u
   return sorted
 }
 
+/** Name of the server-side tool search tool this adapter adds (regex variant). */
+export const TOOL_SEARCH_TOOL_NAME = 'tool_search_tool_regex'
+
+/** Version tag of the regex tool search tool, as documented for the Messages API. */
+export const TOOL_SEARCH_TOOL_TYPE = 'tool_search_tool_regex_20251119'
+
+/**
+ * Whether a tool name matches one `claudeDeferTools` pattern. A pattern is a
+ * literal name, or a literal prefix followed by a single trailing `*`
+ * (`mcp__*`); a bare `*` matches everything. Nothing else is a wildcard, so
+ * a pattern can never be a regular expression a model or a config typo could
+ * turn into something unexpected.
+ * @param name - tool name.
+ * @param pattern - one configured pattern.
+ * @returns true when the pattern covers the name.
+ */
+export function matchesDeferPattern(name: string, pattern: string): boolean {
+  if (pattern.length === 0) return false
+  if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1))
+  return name === pattern
+}
+
+/** Options for {@link toAnthropicToolsDeferred}. */
+export interface DeferredToolsOptions {
+  /** Name patterns whose tools are sent with `defer_loading: true`. */
+  deferPatterns: readonly string[]
+}
+
+/**
+ * Like {@link toAnthropicTools}, with deferred loading and the tool search
+ * tool added. A tool is deferred when DSH marked it (`deferLoading`) or when
+ * its name matches one of `deferPatterns`.
+ *
+ * The API rejects a request in which every tool is deferred, but the search
+ * tool is itself a loaded tool, so deferring every other tool is valid
+ * (verified against the endpoint). It is added only when something is
+ * actually deferred; otherwise the output equals {@link toAnthropicTools}.
+ * The API also rejects `cache_control` on a deferred tool: this function never
+ * adds one, and the request body places its cache mark on `system`. The wire
+ * order stays name-sorted for the existing cache-prefix reason, with the
+ * search tool first so that the deferred set never moves a loaded tool.
+ * @param tools - tool schemas from the request.
+ * @param options - defer rule.
+ * @returns Anthropic `tools` array entries.
+ */
+export function toAnthropicToolsDeferred(
+  tools: readonly ToolSchema[],
+  options: DeferredToolsOptions,
+): Record<string, unknown>[] {
+  const isDeferred = (tool: ToolSchema): boolean =>
+    tool.deferLoading === true || options.deferPatterns.some(pattern => matchesDeferPattern(tool.name, pattern))
+  const deferred = tools.filter(isDeferred)
+  if (deferred.length === 0) return toAnthropicTools(tools)
+  const deferredNames = new Set(deferred.map(tool => tool.name))
+  return [
+    { type: TOOL_SEARCH_TOOL_TYPE, name: TOOL_SEARCH_TOOL_NAME },
+    ...toAnthropicTools(tools).map(({ cache_control: _anchor, ...entry }) => (
+      deferredNames.has(entry.name as string) ? { ...entry, defer_loading: true } : entry
+    )),
+  ]
+}
+
 /** The subset of Anthropic SSE event shapes this translator reads. */
 export interface AnthropicStreamEvent {
   type: string
@@ -570,10 +1003,10 @@ export interface AnthropicStreamEvent {
     type?: string
     id?: string
     name?: string
-    /** Initial thinking text / signature of a `thinking` block (usually empty). */
+    /** `thinking` blocks: text and signature may already be present at start. */
     thinking?: string
     signature?: string
-    /** Encrypted payload of a `redacted_thinking` block. */
+    /** `redacted_thinking` blocks: the encrypted reasoning payload. */
     data?: string
   }
   delta?: {
@@ -586,7 +1019,13 @@ export interface AnthropicStreamEvent {
     /** Anthropic's explanation accompanying a `refusal` stop. */
     stop_details?: { explanation?: string }
   }
-  usage?: { output_tokens?: number }
+  usage?: {
+    output_tokens?: number
+    /** Cumulative across server-side iterations (tool search); absent on ordinary replies. */
+    input_tokens?: number
+    cache_read_input_tokens?: number
+    cache_creation_input_tokens?: number
+  }
   error?: { type?: string; message?: string }
 }
 
@@ -597,10 +1036,20 @@ interface OpenBlock {
   text: string
   callId: string
   name?: string
-  /** Accumulated thinking signature (reasoning blocks only). */
+  /** A `thinking` block's signature, accumulated from `signature_delta`. */
   signature?: string
-  /** `redacted_thinking` payloads streamed just before this block. */
-  redactedBefore?: string[]
+  /** A `redacted_thinking` block's opaque payload. */
+  redactedData?: string
+}
+
+/** The replay entry one closed block contributes to the finish envelope. */
+function blockReplay(block: OpenBlock): AnthropicBlockReplay {
+  if (block.kind !== 'reasoning') return {}
+  if (block.redactedData !== undefined && block.redactedData.length > 0) return { redactedData: block.redactedData }
+  if (block.signature !== undefined && block.signature.length > 0) {
+    return { signature: block.signature, thinkingDigest: thinkingDigest(block.text) }
+  }
+  return {}
 }
 
 /** Assemble the final ContentBlock for one open block. */
@@ -663,17 +1112,26 @@ export function anthropicFailure(error: { type?: string; message?: string } | un
  */
 export class AnthropicStreamTranslator {
   private blocks = new Map<number, OpenBlock>()
+  /** Replay entry per emitted block, by harness index. */
+  private replay: AnthropicBlockReplay[] = []
+  /** Each emitted block, by harness index, for the response-content digest. */
+  private emitted: ContentBlock[] = []
+  /** Set once any block carries a signature or redacted payload worth replaying. */
+  private sawSignedThinking = false
   private nextIndex = 0
+
+  /**
+   * @param binding - what the request this response answers is bound to
+   * ({@link assembleAnthropicMessages}); without it the response's thinking
+   * is recorded unbound and never replayed.
+   */
+  constructor(private readonly binding?: ThinkingBinding) {}
   private sawAnyBlock = false
   private pendingUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined
   private outputTokens: number | undefined
   private stopReason: 'stop' | 'tool-calls' | 'max-tokens' | 'refusal' = 'stop'
   private refusalExplanation: string | undefined
   private usageEmitted = false
-  /** Replay entries by harness block index. */
-  private replay: ClaudeBlockReplay[] = []
-  /** `redacted_thinking` payloads waiting for the next harness block. */
-  private pendingRedacted: string[] = []
   /** Set once `message_stop` produced the terminal finish chunk. */
   terminated = false
 
@@ -684,38 +1142,48 @@ export class AnthropicStreamTranslator {
       text: '',
       callId,
       ...name === undefined ? {} : { name },
-      ...this.pendingRedacted.length === 0 ? {} : { redactedBefore: this.pendingRedacted },
     }
-    this.pendingRedacted = []
     this.blocks.set(wireIndex, block)
     this.sawAnyBlock = true
     chunks.push({ type: 'block-start', index: block.index, blockType: kind })
     return block
   }
 
-  /** Close one block: record its replay entry and emit its `block-end`. */
-  private close(wireIndex: number, block: OpenBlock, chunks: StreamChunk[]): void {
-    this.blocks.delete(wireIndex)
-    const signature = block.kind === 'reasoning' && block.signature !== undefined && block.signature.length > 0
-      ? block.signature
-      : undefined
-    this.replay[block.index] = {
-      ...signature === undefined ? {} : { thinking: { signature, digest: thinkingDigest(block.text) } },
-      ...block.redactedBefore === undefined ? {} : { redactedBefore: block.redactedBefore },
-    }
-    chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
+  /** Emit one block's `block-end` and record its replay entry. */
+  private close(block: OpenBlock, chunks: StreamChunk[]): void {
+    const entry = blockReplay(block)
+    if (Object.keys(entry).length > 0) this.sawSignedThinking = true
+    this.replay[block.index] = entry
+    const content = closeBlock(block)
+    this.emitted[block.index] = content
+    chunks.push({ type: 'block-end', index: block.index, block: content })
   }
 
   /**
-   * The replay envelope for a successful finish, one entry per emitted block;
-   * undefined when the response carried no signed or redacted thinking, so
-   * plain responses do not grow the session log.
+   * The finish envelope: each thinking block's signature aligned with the
+   * emitted blocks, plus the binding of the request it answered and a digest
+   * of the response's own content. Absent when no block needs replay
+   * metadata, so a response without signed thinking stores exactly what it
+   * did before.
    */
   private replayState(): ReplayEnvelope | undefined {
-    const blocks: ClaudeBlockReplay[] = []
+    // A response to a request sent after a refusal records the refusal even
+    // without thinking of its own, so older thinking is never resent.
+    if (!this.sawSignedThinking && this.binding?.reset !== true) return undefined
+    const blocks: AnthropicBlockReplay[] = []
     for (let index = 0; index < this.nextIndex; index++) blocks.push(this.replay[index] ?? {})
-    if (!blocks.some(entry => entry.thinking !== undefined || entry.redactedBefore !== undefined)) return undefined
-    return { response: { kind: 'claude', version: 1 } satisfies ClaudeReplayResponse, blocks }
+    const emitted = this.emitted.filter((block): block is ContentBlock => block !== undefined)
+    const response: AnthropicReplayResponse = {
+      kind: 'anthropic',
+      version: 2,
+      ...this.binding === undefined ? {} : {
+        prefix: this.binding.prefix,
+        prev: this.binding.prev,
+        ...this.binding.reset === true ? { reset: true as const } : {},
+      },
+      content: responseContentDigest(emitted),
+    }
+    return { response, blocks }
   }
 
   private emitUsage(chunks: StreamChunk[]): void {
@@ -768,17 +1236,24 @@ export class AnthropicStreamTranslator {
             break
           case 'thinking': {
             const opened = this.open(wireIndex, 'reasoning', chunks)
+            // Both fields normally arrive empty and fill in through deltas;
+            // keep whatever the start event already carries.
             if (typeof block.signature === 'string' && block.signature.length > 0) opened.signature = block.signature
             if (typeof block.thinking === 'string' && block.thinking.length > 0) {
-              opened.text += block.thinking
+              opened.text = block.thinking
               chunks.push({ type: 'reasoning-delta', index: opened.index, text: block.thinking })
             }
             break
           }
-          case 'redacted_thinking':
-            // No harness content; replayed ahead of the block that follows it.
-            if (typeof block.data === 'string' && block.data.length > 0) this.pendingRedacted.push(block.data)
+          case 'redacted_thinking': {
+            // Encrypted reasoning: nothing readable to show, but the payload
+            // must go back verbatim for the model to keep its reasoning.
+            const opened = this.open(wireIndex, 'reasoning', chunks)
+            opened.text = REDACTED_THINKING_TEXT
+            if (typeof block.data === 'string') opened.redactedData = block.data
+            chunks.push({ type: 'reasoning-delta', index: opened.index, text: REDACTED_THINKING_TEXT })
             break
+          }
           case 'tool_use': {
             const opened = this.open(wireIndex, 'tool-call', chunks, block.id ?? '', block.name)
             chunks.push({
@@ -820,11 +1295,12 @@ export class AnthropicStreamTranslator {
             })
             break
           case 'signature_delta':
-            // No harness content; kept for replaying the signed thinking.
+            // Not harness content: the signature rides in the finish
+            // envelope so the next request can replay this thinking block.
             if (block.kind === 'reasoning') block.signature = (block.signature ?? '') + (delta.signature ?? '')
             break
           default:
-            // future deltas carry no harness content.
+            // Future deltas carry no harness content.
             break
         }
         return chunks
@@ -833,11 +1309,28 @@ export class AnthropicStreamTranslator {
         const wireIndex = event.index ?? 0
         const block = this.blocks.get(wireIndex)
         if (block === undefined) return chunks
-        this.close(wireIndex, block, chunks)
+        this.blocks.delete(wireIndex)
+        this.close(block, chunks)
         return chunks
       }
       case 'message_delta': {
         if (event.usage?.output_tokens !== undefined) this.outputTokens = event.usage.output_tokens
+        // When the server runs a tool search inside the turn, `message_start` reports only the first iteration's input;
+        // `message_delta` then carries the cumulative total. Replace the start figures only for the fields it sends,
+        // so an ordinary reply (no input fields in the delta) keeps reporting exactly what it did before.
+        const total = event.usage
+        if (total !== undefined && (total.input_tokens !== undefined
+          || total.cache_read_input_tokens !== undefined || total.cache_creation_input_tokens !== undefined)) {
+          this.pendingUsage = {
+            inputTokens: total.input_tokens ?? this.pendingUsage?.inputTokens ?? 0,
+            ...(total.cache_read_input_tokens ?? this.pendingUsage?.cacheReadTokens) !== undefined
+              ? { cacheReadTokens: (total.cache_read_input_tokens ?? this.pendingUsage?.cacheReadTokens) as number }
+              : {},
+            ...(total.cache_creation_input_tokens ?? this.pendingUsage?.cacheWriteTokens) !== undefined
+              ? { cacheWriteTokens: (total.cache_creation_input_tokens ?? this.pendingUsage?.cacheWriteTokens) as number }
+              : {},
+          }
+        }
         switch (event.delta?.stop_reason) {
           case 'end_turn':
           case 'stop_sequence':
@@ -862,7 +1355,10 @@ export class AnthropicStreamTranslator {
       }
       case 'message_stop': {
         this.terminated = true
-        for (const [wireIndex, block] of [...this.blocks]) this.close(wireIndex, block, chunks)
+        for (const [wireIndex, block] of [...this.blocks]) {
+          this.blocks.delete(wireIndex)
+          this.close(block, chunks)
+        }
         this.emitUsage(chunks)
         if (this.stopReason === 'refusal') {
           // The safety classifier stopped the turn; retrying it verbatim
@@ -911,13 +1407,15 @@ export class AnthropicStreamTranslator {
  * Consume an Anthropic SSE byte stream and yield harness StreamChunks.
  * @param stream - raw response body.
  * @param onActivity - transport-activity callback for the idle watchdog.
+ * @param binding - what the request is bound to, recorded with its thinking.
  * @returns the chunk stream; throws when the stream ends before `message_stop`.
  */
 export async function* streamAnthropic(
   stream: ReadableStream<Uint8Array>,
   onActivity?: () => void,
+  binding?: ThinkingBinding,
 ): AsyncGenerator<StreamChunk> {
-  const translator = new AnthropicStreamTranslator()
+  const translator = new AnthropicStreamTranslator(binding)
   for await (const sseEvent of parseSse(stream, onActivity)) {
     let event: AnthropicStreamEvent
     try {
